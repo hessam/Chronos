@@ -1,17 +1,42 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Only create real client if env vars are set
+let supabase: SupabaseClient;
+
+if (supabaseUrl && supabaseAnonKey) {
+    supabase = createClient(supabaseUrl, supabaseAnonKey);
+} else {
+    console.warn('⚠️ Supabase credentials not configured. Running in demo mode.');
+    // Create a minimal stub so the app doesn't crash
+    supabase = {
+        auth: {
+            getSession: async () => ({ data: { session: null }, error: null }),
+            getUser: async () => ({ data: { user: null }, error: null }),
+            signUp: async () => { throw new Error('Supabase not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env'); },
+            signInWithPassword: async () => { throw new Error('Supabase not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env'); },
+            signOut: async () => ({ error: null }),
+            onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => { } } } }),
+            refreshSession: async () => ({ data: { session: null }, error: null }),
+        },
+    } as unknown as SupabaseClient;
+}
+
+export { supabase };
 
 // ─── API Client ──────────────────────────────────────────────
 const API_BASE = '/api/v1';
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) return {};
-    return { Authorization: `Bearer ${session.access_token}` };
+    try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) return {};
+        return { Authorization: `Bearer ${session.access_token}` };
+    } catch {
+        return {};
+    }
 }
 
 async function request<T>(
