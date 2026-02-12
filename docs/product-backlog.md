@@ -1,11 +1,11 @@
 # Chronos: Product Backlog
 **Scrum Master Documentation**
 
-**Version:** 1.0  
-**Date:** February 10, 2026  
+**Version:** 1.1  
+**Last Updated:** February 12, 2026  
 **Sprint Duration:** 2 weeks  
 **Total Sprints:** 6 (12 weeks / 60 working days)  
-**Team Velocity:** ~40 story points per sprint (estimated)
+**Team Velocity:** 42 story points (Sprint 1 actual)
 
 ---
 
@@ -69,7 +69,7 @@ graph LR
 
 ### Epic 1: Foundation & Core Infrastructure
 
-#### E1-US1: User Registration and Authentication
+#### E1-US1: User Registration and Authentication ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** create an account and log in securely  
 **So that** my narrative data is private and accessible only to me
@@ -93,7 +93,7 @@ graph LR
 
 ---
 
-#### E1-US2: Project Creation and Management
+#### E1-US2: Project Creation and Management ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** create and manage multiple narrative projects  
 **So that** I can organize different stories independently
@@ -115,7 +115,7 @@ graph LR
 
 ---
 
-#### E1-US3: Character Entity CRUD
+#### E1-US3: Character Entity CRUD ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** create, edit, and delete character entities  
 **So that** I can build my cast of characters
@@ -139,7 +139,7 @@ graph LR
 
 ---
 
-#### E1-US4: Timeline Entity CRUD
+#### E1-US4: Timeline Entity CRUD ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** create and manage timeline entities  
 **So that** I can organize events across multiple timelines
@@ -158,7 +158,7 @@ graph LR
 
 ---
 
-#### E1-US5: Event Entity CRUD
+#### E1-US5: Event Entity CRUD ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** create and manage event entities  
 **So that** I can document key story moments
@@ -179,7 +179,7 @@ graph LR
 
 ### Epic 2: Timeline Visualization
 
-#### E2-US1: Basic Timeline Canvas
+#### E2-US1: Basic Timeline Canvas ✅ *Completed Sprint 1*
 **As a** writer  
 **I want to** see my events on an interactive timeline  
 **So that** I can visualize my narrative structure
@@ -203,7 +203,7 @@ graph LR
 
 ---
 
-#### E2-US2: Multi-Timeline View
+#### E2-US2: Multi-Timeline View — *Sprint 2*
 **As a** writer  
 **I want to** view multiple timelines in parallel  
 **So that** I can see how different storylines intersect
@@ -221,7 +221,7 @@ graph LR
 
 ---
 
-#### E2-US3: Event Drag-and-Drop on Timeline
+#### E2-US3: Event Drag-and-Drop on Timeline — *Sprint 2*
 **As a** writer  
 **I want to** drag events to different positions on the timeline  
 **So that** I can easily reorganize my narrative
@@ -258,7 +258,7 @@ graph LR
 
 ### Epic 3: AI-Powered Intelligence
 
-#### E3-US1: Multi-AI Provider Setup
+#### E3-US1: Multi-AI Provider Setup — *Sprint 2*
 **As a** system  
 **I want to** support multiple AI providers  
 **So that** we have redundancy and cost optimization
@@ -281,7 +281,7 @@ graph LR
 
 ---
 
-#### E3-US2: AI Model Selection UI
+#### E3-US2: AI Model Selection UI — *Sprint 2*
 **As a** writer  
 **I want to** choose which AI model to use  
 **So that** I can optimize for cost or quality
@@ -299,7 +299,7 @@ graph LR
 
 ---
 
-#### E3-US3: AI Idea Generation
+#### E3-US3: AI Idea Generation — *Sprint 2*
 **As a** writer  
 **I want to** generate creative ideas based on my characters and events  
 **So that** I can overcome writer's block
