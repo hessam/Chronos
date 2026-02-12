@@ -133,33 +133,42 @@ gantt
 
 ---
 
-## Sprint 3: AI Intelligence & Consistency
+## Sprint 3: AI Intelligence, Consistency & Timeline Variants
 **Dates:** Mar 24 - Apr 4, 2026  
-**Goal:** Consistency checking and ripple analysis  
-**Demo:** User changes event, sees AI-detected conflicts and suggestions
+**Goal:** Timeline variants data model, consistency checking, and ripple analysis  
+**Demo:** User defines how a character differs across timelines; changes event, sees AI-detected conflicts
 
-### User Stories (39 points)
+### User Stories (47 points)
 
 | ID | Story | Points | Owner |
 |----|-------|--------|-------|
-| E2-US4 | Cross-timeline event indicators | 5 | Frontend Lead |
+| E2-US5 | Timeline Variants — per-timeline entity overrides ([ADR-001](adr/ADR-001-timeline-variants.md)) | 8 | Full Stack |
+| E2-US4 | Cross-timeline event indicators (delivered via E2-US5) | — | — |
 | E3-US4 | AI consistency checking | 13 | AI/ML Lead |
 | E3-US5 | Ripple effect analysis (Antigravity) | 21 | AI/ML + Backend |
+| | **Buffer** | 5 | — |
 
 ### Sprint 3 Deliverables
 
-**✅ Features:**
-1. Visual indicators for cross-timeline events
-2. **"Check Consistency" button on timelines/arcs**
-3. AI flags contradictions (character presence, causality)
-4. **Ripple analysis when editing critical events**
-5. AI suggests specific changes to resolve conflicts
-6. Preview changes before applying
+**✅ Timeline Variants (E2-US5):**
+1. Database migration 002: `timeline_variants` table + RLS
+2. API: CRUD for variant overrides + entity resolve logic
+3. Entity detail panel: "Timeline Variants" tab
+4. Canvas: variant indicator badge on entity nodes
+5. Canvas: cross-timeline connector lines for shared entities
+
+**✅ AI Consistency (E3-US4, E3-US5):**
+1. **"Check Consistency" button on timelines/arcs**
+2. AI flags contradictions (character presence, causality)
+3. **Ripple analysis when editing critical events**
+4. AI suggests specific changes to resolve conflicts
+5. Preview changes before applying
 
 **✅ Technical:**
 - Graph traversal queries (recursive CTEs)
 - Batch AI requests for performance
 - Conflict detection algorithms
+- Variant resolve logic with property merging
 
 ---
 

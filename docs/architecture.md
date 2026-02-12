@@ -448,6 +448,8 @@ erDiagram
     ENTITIES ||--o{ RELATIONSHIPS : source
     ENTITIES ||--o{ RELATIONSHIPS : target
     ENTITIES ||--o{ ENTITY_HISTORY : tracks
+    ENTITIES ||--o{ TIMELINE_VARIANTS : "has variants"
+    ENTITIES ||--o{ TIMELINE_VARIANTS : "scoped to timeline"
     
     USERS {
         uuid id PK
@@ -496,6 +498,20 @@ erDiagram
         jsonb before
         jsonb after
         timestamp created_at
+    }
+
+    TIMELINE_VARIANTS {
+        uuid id PK
+        uuid project_id FK
+        uuid entity_id FK
+        uuid timeline_id FK
+        text variant_name
+        text variant_description
+        jsonb variant_properties
+        float position_x
+        float position_y
+        timestamp created_at
+        timestamp updated_at
     }
 ```
 

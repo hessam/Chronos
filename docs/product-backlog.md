@@ -252,7 +252,34 @@ graph LR
 
 **Story Points:** 5  
 **Priority:** P2  
-**Dependencies:** E2-US2
+**Dependencies:** E2-US2  
+**Note:** Superseded by E2-US5 (Timeline Variants), which provides a richer data model. E2-US4's acceptance criteria are delivered as part of E2-US5.
+
+---
+
+#### E2-US5: Timeline Variants — Per-Timeline Entity Overrides — *Sprint 3*
+**As a** writer  
+**I want to** define how any entity (character, event, location, arc, theme) differs across timelines  
+**So that** I can model divergent realities where the same entity has timeline-specific variations
+
+**Acceptance Criteria:**
+- `timeline_variants` table stores per-timeline overrides for any entity type
+- Entity detail panel shows a "Timeline Variants" tab listing all timelines with overrides
+- Each variant is independently editable (name, description, properties)
+- Canvas nodes show a variant indicator (colored dots) when overrides exist
+- When a timeline is selected/focused, entities resolve with that timeline's overrides
+- Entities without variants display their canonical data unchanged
+- Cross-timeline connector lines render for entities shared across swim-lanes (supersedes E2-US4)
+
+**Technical Notes:**
+- See [ADR-001: Timeline Variants](../adr/ADR-001-timeline-variants.md)
+- Database migration 002: `timeline_variants` table + RLS + indexes
+- Frontend merge logic: `resolveEntity(entity, timelineId, variants)`
+- Extends existing polymorphic entity model — no schema changes to `entities` table
+
+**Story Points:** 8  
+**Priority:** P1  
+**Dependencies:** E2-US2 ✅
 
 ---
 
