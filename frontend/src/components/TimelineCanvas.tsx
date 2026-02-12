@@ -6,6 +6,8 @@ interface TimelineCanvasProps {
     entities: Entity[];
     onEntitySelect: (entity: Entity) => void;
     selectedEntityId?: string | null;
+    onEntityPositionUpdate?: (entityId: string, x: number, y: number) => void;
+    hiddenTypes?: Set<string>;
 }
 
 // ─── Color Palette ──────────────────────────────────────────
@@ -35,74 +37,71 @@ interface PositionedNode {
     x: number;
     y: number;
     color: string;
+    laneIndex: number;
 }
 
-function layoutNodes(entities: Entity[]): PositionedNode[] {
-    // Group entities by type and place them in swim-lanes
-    const timelines = entities.filter(e => e.entity_type === 'timeline');
-    const events = entities.filter(e => e.entity_type === 'event');
-    const characters = entities.filter(e => e.entity_type === 'character');
-    const others = entities.filter(e =>
-        !['timeline', 'event', 'character'].includes(e.entity_type)
-    );
+type LaneDef = { type: string; label: string; color: string };
 
-    const nodes: PositionedNode[] = [];
-    const laneHeight = 120;
+function buildLanes(entities: Entity[]): LaneDef[] {
+    const seen = new Set<string>();
+    const lanes: LaneDef[] = [];
+    // Timelines first, then events, then characters, then others
+    const order = ['timeline', 'event', 'character', 'arc', 'theme', 'location', 'note'];
+    for (const t of order) {
+        if (entities.some(e => e.entity_type === t)) {
+            seen.add(t);
+            lanes.push({ type: t, label: t.charAt(0).toUpperCase() + t.slice(1) + 's', color: TYPE_COLORS[t] || '#64748b' });
+        }
+    }
+    // Any types not in our order
+    for (const e of entities) {
+        if (!seen.has(e.entity_type)) {
+            seen.add(e.entity_type);
+            lanes.push({ type: e.entity_type, label: e.entity_type, color: TYPE_COLORS[e.entity_type] || '#64748b' });
+        }
+    }
+    return lanes;
+}
+
+function layoutNodes(entities: Entity[], hiddenTypes: Set<string>): { nodes: PositionedNode[]; lanes: LaneDef[] } {
+    const visibleEntities = entities.filter(e => !hiddenTypes.has(e.entity_type));
+    const lanes = buildLanes(visibleEntities);
+    const laneHeight = 130;
     const nodeSpacing = 200;
-    let currentLane = 0;
+    const laneStartX = 160; // leave room for lane labels
+    const nodes: PositionedNode[] = [];
 
-    // Timelines as horizontal swim-lanes
-    timelines.forEach((entity, i) => {
-        const hasPos = entity.position_x !== 0 || entity.position_y !== 0;
-        nodes.push({
-            entity,
-            x: hasPos ? entity.position_x : 80,
-            y: hasPos ? entity.position_y : 100 + i * laneHeight,
-            color: entity.color || TYPE_COLORS.timeline,
-        });
-        currentLane = i + 1;
-    });
-
-    // Events spread horizontally
-    events.forEach((entity, i) => {
-        const hasPos = entity.position_x !== 0 || entity.position_y !== 0;
-        nodes.push({
-            entity,
-            x: hasPos ? entity.position_x : 200 + i * nodeSpacing,
-            y: hasPos ? entity.position_y : 100 + currentLane * laneHeight,
-            color: entity.color || TYPE_COLORS.event,
-        });
-    });
-    if (events.length > 0) currentLane++;
-
-    // Characters in a row
-    characters.forEach((entity, i) => {
-        const hasPos = entity.position_x !== 0 || entity.position_y !== 0;
-        nodes.push({
-            entity,
-            x: hasPos ? entity.position_x : 200 + i * nodeSpacing,
-            y: hasPos ? entity.position_y : 100 + currentLane * laneHeight,
-            color: entity.color || TYPE_COLORS.character,
-        });
-    });
-    if (characters.length > 0) currentLane++;
-
-    // Others
-    others.forEach((entity, i) => {
-        const hasPos = entity.position_x !== 0 || entity.position_y !== 0;
-        nodes.push({
-            entity,
-            x: hasPos ? entity.position_x : 200 + i * nodeSpacing,
-            y: hasPos ? entity.position_y : 100 + currentLane * laneHeight,
-            color: entity.color || TYPE_COLORS[entity.entity_type] || '#64748b',
+    lanes.forEach((lane, laneIdx) => {
+        const laneEntities = visibleEntities.filter(e => e.entity_type === lane.type);
+        laneEntities.forEach((entity, i) => {
+            const hasPos = entity.position_x !== 0 || entity.position_y !== 0;
+            nodes.push({
+                entity,
+                x: hasPos ? entity.position_x : laneStartX + i * nodeSpacing,
+                y: hasPos ? entity.position_y : 80 + laneIdx * laneHeight,
+                color: entity.color || lane.color,
+                laneIndex: laneIdx,
+            });
         });
     });
 
-    return nodes;
+    return { nodes, lanes };
+}
+
+// ─── Snap to grid ───────────────────────────────────────────
+const SNAP_SIZE = 20;
+function snap(v: number): number {
+    return Math.round(v / SNAP_SIZE) * SNAP_SIZE;
 }
 
 // ─── Component ──────────────────────────────────────────────
-export default function TimelineCanvas({ entities, onEntitySelect, selectedEntityId }: TimelineCanvasProps) {
+export default function TimelineCanvas({
+    entities,
+    onEntitySelect,
+    selectedEntityId,
+    onEntityPositionUpdate,
+    hiddenTypes = new Set(),
+}: TimelineCanvasProps) {
     const svgRef = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
@@ -177,20 +176,51 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
         }
 
         // ─── Layout ──────────────────────────────────────
-        const nodes = layoutNodes(entities);
+        const { nodes, lanes } = layoutNodes(entities, hiddenTypes);
 
         if (nodes.length === 0) return;
 
-        // ─── Timeline swim-lane lines ────────────────────
-        const timelineNodes = nodes.filter(n => n.entity.entity_type === 'timeline');
-        timelineNodes.forEach(tl => {
+        const laneHeight = 130;
+
+        // ─── Swim-lane backgrounds & labels ──────────────
+        lanes.forEach((lane, i) => {
+            const laneY = 50 + i * laneHeight;
+
+            // Lane stripe
+            g.append('rect')
+                .attr('x', -2000)
+                .attr('y', laneY)
+                .attr('width', 10000)
+                .attr('height', laneHeight)
+                .attr('fill', i % 2 === 0 ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)')
+                .attr('rx', 0);
+
+            // Lane separator
             g.append('line')
-                .attr('x1', tl.x - 20)
-                .attr('y1', tl.y)
-                .attr('x2', tl.x + width * 2)
-                .attr('y2', tl.y)
-                .attr('stroke', tl.color)
-                .attr('stroke-opacity', 0.15)
+                .attr('x1', -2000).attr('y1', laneY)
+                .attr('x2', 10000).attr('y2', laneY)
+                .attr('stroke', 'rgba(255,255,255,0.04)')
+                .attr('stroke-width', 1);
+
+            // Lane label
+            g.append('text')
+                .attr('x', 12)
+                .attr('y', laneY + 22)
+                .attr('font-size', '11px')
+                .attr('font-weight', '600')
+                .attr('fill', lane.color)
+                .attr('font-family', 'Inter, sans-serif')
+                .attr('opacity', 0.7)
+                .text(`${TYPE_ICONS[lane.type] || '📋'} ${lane.label}`);
+
+            // Lane timeline line
+            g.append('line')
+                .attr('x1', 140)
+                .attr('y1', laneY + laneHeight / 2)
+                .attr('x2', 10000)
+                .attr('y2', laneY + laneHeight / 2)
+                .attr('stroke', lane.color)
+                .attr('stroke-opacity', 0.1)
                 .attr('stroke-width', 2)
                 .attr('stroke-dasharray', '8 4');
         });
@@ -201,21 +231,41 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
             .join('g')
             .attr('class', 'entity-node')
             .attr('transform', d => `translate(${d.x}, ${d.y})`)
-            .style('cursor', 'pointer');
+            .style('cursor', 'grab');
 
-        // Drag behavior
+        // Drag behavior with snap-to-grid and position persistence
+        let dragMoved = false;
         const drag = d3.drag<SVGGElement, PositionedNode>()
             .on('start', function () {
-                d3.select(this).raise();
+                dragMoved = false;
+                d3.select(this).raise().style('cursor', 'grabbing');
             })
             .on('drag', function (event, d) {
-                d.x = event.x;
-                d.y = event.y;
+                dragMoved = true;
+                d.x = snap(event.x);
+                d.y = snap(event.y);
                 d3.select(this).attr('transform', `translate(${d.x}, ${d.y})`);
+            })
+            .on('end', function (_, d) {
+                d3.select(this).style('cursor', 'grab');
+                if (dragMoved && onEntityPositionUpdate) {
+                    onEntityPositionUpdate(d.entity.id, d.x, d.y);
+                }
             });
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         nodeGroup.call(drag as any);
+
+        // Ghost marker during drag (opacity change handled via CSS-like approach)
+        nodeGroup.append('rect')
+            .attr('x', -74)
+            .attr('y', -32)
+            .attr('width', 148)
+            .attr('height', 64)
+            .attr('rx', 14)
+            .attr('ry', 14)
+            .attr('fill', 'transparent')
+            .attr('class', 'ghost-boundary');
 
         // Node background (rounded rect)
         nodeGroup.append('rect')
@@ -273,15 +323,27 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
             .attr('text-transform', 'capitalize')
             .text(d => d.entity.entity_type);
 
-        // Click handler
+        // Position badge (small coord display)
+        nodeGroup.append('text')
+            .attr('x', 65)
+            .attr('y', 24)
+            .attr('font-size', '8px')
+            .attr('text-anchor', 'end')
+            .attr('fill', 'rgba(148,163,184,0.3)')
+            .attr('font-family', 'SF Mono, monospace')
+            .text(d => `${d.x},${d.y}`);
+
+        // Click handler (only if not dragged)
         nodeGroup.on('click', (_event, d) => {
-            onEntitySelect(d.entity);
+            if (!dragMoved) {
+                onEntitySelect(d.entity);
+            }
         });
 
         // Hover effects
         nodeGroup
             .on('mouseenter', function (_, d) {
-                d3.select(this).select('rect:first-child')
+                d3.select(this).select('rect:nth-child(2)')
                     .transition().duration(150)
                     .attr('stroke', d.color)
                     .attr('stroke-width', 2)
@@ -289,7 +351,7 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
             })
             .on('mouseleave', function (_, d) {
                 const isSelected = d.entity.id === selectedEntityId;
-                d3.select(this).select('rect:first-child')
+                d3.select(this).select('rect:nth-child(2)')
                     .transition().duration(150)
                     .attr('stroke', isSelected ? d.color : 'rgba(255,255,255,0.08)')
                     .attr('stroke-width', isSelected ? 2 : 1)
@@ -298,7 +360,7 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
 
         // ─── Fit to content on initial render ────────────
         if (nodes.length > 0) {
-            const padding = 80;
+            const padding = 100;
             const xs = nodes.map(n => n.x);
             const ys = nodes.map(n => n.y);
             const minX = Math.min(...xs) - padding;
@@ -321,11 +383,14 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
                 d3.zoomIdentity.translate(translateX, translateY).scale(scale)
             );
         }
-    }, [entities, dimensions, selectedEntityId, onEntitySelect]);
+    }, [entities, dimensions, selectedEntityId, onEntitySelect, onEntityPositionUpdate, hiddenTypes]);
 
     useEffect(() => {
         renderCanvas();
     }, [renderCanvas]);
+
+    // Gather unique types for the legend
+    const uniqueTypes = [...new Set(entities.map(e => e.entity_type))];
 
     return (
         <div
@@ -410,7 +475,7 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
                 >⟲</button>
             </div>
 
-            {/* Legend */}
+            {/* Legend — show all entity types in the project */}
             <div style={{
                 position: 'absolute',
                 top: 12,
@@ -425,12 +490,36 @@ export default function TimelineCanvas({ entities, onEntitySelect, selectedEntit
                 fontSize: 11,
                 color: 'var(--text-tertiary)',
             }}>
-                {Object.entries(TYPE_COLORS).slice(0, 4).map(([type, color]) => (
-                    <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
-                        <span style={{ textTransform: 'capitalize' }}>{type}</span>
-                    </div>
-                ))}
+                {uniqueTypes.length > 0
+                    ? uniqueTypes.map(type => (
+                        <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: TYPE_COLORS[type] || '#64748b' }} />
+                            <span style={{ textTransform: 'capitalize' }}>{type}</span>
+                        </div>
+                    ))
+                    : Object.entries(TYPE_COLORS).slice(0, 4).map(([type, color]) => (
+                        <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
+                            <span style={{ textTransform: 'capitalize' }}>{type}</span>
+                        </div>
+                    ))
+                }
+            </div>
+
+            {/* Entity count badge */}
+            <div style={{
+                position: 'absolute',
+                bottom: 12,
+                left: 12,
+                background: 'rgba(15,23,42,0.7)',
+                backdropFilter: 'blur(8px)',
+                borderRadius: 8,
+                padding: '4px 10px',
+                border: '1px solid rgba(255,255,255,0.06)',
+                fontSize: 11,
+                color: 'var(--text-tertiary)',
+            }}>
+                {entities.length} entities • Drag to reposition • Scroll to zoom
             </div>
         </div>
     );

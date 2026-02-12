@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import SignUpPage from './pages/SignUpPage';
 import ProjectsPage from './pages/ProjectsPage';
 import WorkspacePage from './pages/WorkspacePage';
+import SettingsPage from './pages/SettingsPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const { isAuthenticated, isLoading } = useAuthStore();
@@ -56,6 +57,7 @@ export default function App() {
                 <Route path="/signup" element={<AuthRoute><SignUpPage /></AuthRoute>} />
                 <Route path="/projects" element={<ProtectedRoute><ProjectsPage /></ProtectedRoute>} />
                 <Route path="/project/:projectId" element={<ProtectedRoute><WorkspacePage /></ProtectedRoute>} />
+                <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
                 <Route path="*" element={<Navigate to="/projects" replace />} />
             </Routes>
         </BrowserRouter>

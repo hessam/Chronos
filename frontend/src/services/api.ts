@@ -120,6 +120,20 @@ export const api = {
         return { entity: data as Entity };
     },
 
+    async updateEntity(
+        id: string,
+        body: Partial<{ name: string; description: string; properties: Record<string, unknown>; position_x: number; position_y: number; color: string | null; entity_type: string }>
+    ): Promise<{ entity: Entity }> {
+        const { data, error } = await supabase
+            .from('entities')
+            .update(body)
+            .eq('id', id)
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { entity: data as Entity };
+    },
+
     async deleteEntity(id: string): Promise<void> {
         const { error } = await supabase
             .from('entities')
