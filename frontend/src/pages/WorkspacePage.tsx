@@ -3,9 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAppStore, resolveEntity } from '../store/appStore';
-import type { Entity, TimelineVariant } from '../store/appStore';
+import type { Entity } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
-import { TimelineCanvas } from '../components/TimelineCanvas';
+import TimelineCanvas from '../components/TimelineCanvas';
 import { generateIdeas, hasConfiguredProvider } from '../services/aiService';
 import type { GeneratedIdea, GenerateIdeasResult } from '../services/aiService';
 

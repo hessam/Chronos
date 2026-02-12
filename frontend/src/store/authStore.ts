@@ -14,33 +14,66 @@ interface AuthState {
     signOut: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+// Timeout for auth initialization — prevents infinite blank page
+const AUTH_TIMEOUT_MS = 8000;
+
+export const useAuthStore = create<AuthState>((set, get) => ({
     user: null,
     session: null,
     isLoading: true,
     isAuthenticated: false,
 
     initialize: async () => {
-        try {
-            const { data: { session } } = await supabase.auth.getSession();
-            set({
-                user: session?.user ?? null,
-                session,
-                isAuthenticated: !!session,
-                isLoading: false,
-            });
+        // Guard against double initialization
+        if (!get().isLoading) return;
 
-            // Listen for auth changes
+        let resolved = false;
+
+        // Timeout fallback: if Supabase is slow, stop loading and show login
+        const timeout = setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                console.warn('⚠️ Auth initialization timed out after', AUTH_TIMEOUT_MS, 'ms — falling back to unauthenticated.');
+                set({ isLoading: false, isAuthenticated: false });
+            }
+        }, AUTH_TIMEOUT_MS);
+
+        try {
+            const { data: { session }, error } = await supabase.auth.getSession();
+
+            if (error) {
+                console.warn('Auth session check failed:', error.message);
+            }
+
+            if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                set({
+                    user: session?.user ?? null,
+                    session,
+                    isAuthenticated: !!session,
+                    isLoading: false,
+                });
+            }
+
+            // Listen for auth changes (sign-in, sign-out, token refresh)
             supabase.auth.onAuthStateChange((_event, session) => {
                 set({
                     user: session?.user ?? null,
                     session,
                     isAuthenticated: !!session,
+                    isLoading: false, // Always mark loading as done on any auth event
                 });
             });
+
+            // Note: subscription lives for the app lifetime (no cleanup needed)
         } catch (err) {
-            console.warn('Auth initialization failed:', err);
-            set({ isLoading: false, isAuthenticated: false });
+            clearTimeout(timeout);
+            if (!resolved) {
+                resolved = true;
+                console.warn('Auth initialization failed:', err);
+                set({ isLoading: false, isAuthenticated: false });
+            }
         }
     },
 

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAuthStore } from '../store/authStore';
-import type { Project } from '../store/appStore';
+
 
 export default function ProjectsPage() {
     const navigate = useNavigate();
