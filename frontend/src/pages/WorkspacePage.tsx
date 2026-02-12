@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAppStore, Entity, Project } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
+import TimelineCanvas from '../components/TimelineCanvas';
 
 const ENTITY_ICONS: Record<string, string> = {
     character: '👤',
@@ -190,58 +191,65 @@ export default function WorkspacePage() {
             </aside>
 
             {/* ─── Main Content ──────────────────────────────── */}
-            <main className="main-content" style={{ padding: 'var(--space-3)' }}>
+            <main className="main-content" style={{ padding: 0, display: 'flex', flexDirection: 'column' }}>
                 {!selectedEntity ? (
-                    <div className="empty-state" style={{ height: '100%' }}>
-                        <div className="empty-state-icon">🌌</div>
-                        <p className="empty-state-title">Select an entity to view details</p>
-                        <p style={{ color: 'var(--text-tertiary)', maxWidth: 400 }}>
-                            Choose a character, timeline, or event from the sidebar, or create a new one to begin building your narrative universe.
-                        </p>
+                    <div style={{ flex: 1, position: 'relative' }}>
+                        <TimelineCanvas
+                            entities={filteredEntities}
+                            onEntitySelect={setSelectedEntity}
+                            selectedEntityId={null}
+                        />
                     </div>
                 ) : (
-                    <div style={{ maxWidth: 720 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
-                            <span style={{ fontSize: 32 }}>{ENTITY_ICONS[selectedEntity.entity_type]}</span>
-                            <div style={{ flex: 1 }}>
-                                <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600 }}>{selectedEntity.name}</h1>
-                                <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>{selectedEntity.entity_type}</span>
+                    <div style={{ padding: 'var(--space-3)', overflowY: 'auto', flex: 1 }}>
+                        <div style={{ maxWidth: 720 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
+                                <button
+                                    className="btn btn-ghost btn-sm"
+                                    onClick={() => setSelectedEntity(null)}
+                                    title="Back to canvas"
+                                >← Canvas</button>
+                                <span style={{ fontSize: 32 }}>{ENTITY_ICONS[selectedEntity.entity_type]}</span>
+                                <div style={{ flex: 1 }}>
+                                    <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600 }}>{selectedEntity.name}</h1>
+                                    <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>{selectedEntity.entity_type}</span>
+                                </div>
+                                <button
+                                    className="btn btn-destructive btn-sm"
+                                    onClick={() => {
+                                        if (confirm(`Delete "${selectedEntity.name}"?`)) {
+                                            deleteEntity.mutate(selectedEntity.id);
+                                        }
+                                    }}
+                                >
+                                    Delete
+                                </button>
                             </div>
-                            <button
-                                className="btn btn-destructive btn-sm"
-                                onClick={() => {
-                                    if (confirm(`Delete "${selectedEntity.name}"?`)) {
-                                        deleteEntity.mutate(selectedEntity.id);
-                                    }
-                                }}
-                            >
-                                Delete
-                            </button>
-                        </div>
 
-                        {selectedEntity.description && (
-                            <div style={{ marginBottom: 'var(--space-3)' }}>
-                                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Description</h3>
-                                <p style={{ lineHeight: 1.6 }}>{selectedEntity.description}</p>
+                            {selectedEntity.description && (
+                                <div style={{ marginBottom: 'var(--space-3)' }}>
+                                    <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Description</h3>
+                                    <p style={{ lineHeight: 1.6 }}>{selectedEntity.description}</p>
+                                </div>
+                            )}
+
+                            {Object.keys(selectedEntity.properties).length > 0 && (
+                                <div style={{ marginBottom: 'var(--space-3)' }}>
+                                    <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Properties</h3>
+                                    {Object.entries(selectedEntity.properties).map(([key, value]) => (
+                                        <div key={key} style={{ display: 'flex', gap: 'var(--space-2)', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                                            <span style={{ fontWeight: 500, minWidth: 120, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
+                                            <span>{Array.isArray(value) ? value.join(', ') : String(value)}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div style={{ marginTop: 'var(--space-3)', padding: 'var(--space-2)', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                                <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
+                                    Created: {new Date(selectedEntity.created_at).toLocaleString()} • Updated: {new Date(selectedEntity.updated_at).toLocaleString()}
+                                </p>
                             </div>
-                        )}
-
-                        {Object.keys(selectedEntity.properties).length > 0 && (
-                            <div style={{ marginBottom: 'var(--space-3)' }}>
-                                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Properties</h3>
-                                {Object.entries(selectedEntity.properties).map(([key, value]) => (
-                                    <div key={key} style={{ display: 'flex', gap: 'var(--space-2)', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                                        <span style={{ fontWeight: 500, minWidth: 120, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
-                                        <span>{Array.isArray(value) ? value.join(', ') : String(value)}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        <div style={{ marginTop: 'var(--space-3)', padding: 'var(--space-2)', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-                            <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
-                                Created: {new Date(selectedEntity.created_at).toLocaleString()} • Updated: {new Date(selectedEntity.updated_at).toLocaleString()}
-                            </p>
                         </div>
                     </div>
                 )}
