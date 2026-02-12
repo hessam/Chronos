@@ -6,7 +6,7 @@
 **Sprint Duration:** 2 weeks (10 working days)  
 **Total Sprints:** 6  
 **Team Capacity:** 40 story points per sprint (9-person team)  
-**Current Sprint:** Sprint 3
+**Current Sprint:** Sprint 5
 
 ---
 
@@ -148,16 +148,16 @@ gantt
 **Dates:** Feb 26 - Mar 11, 2026  
 **Goal:** Per-timeline entity overrides, AI consistency checking, and ripple effect analysis  
 **Demo:** User defines how Alice differs across timelines; edits a critical event, sees AI-detected conflicts and suggested fixes  
-**Status:** 🟢 Not Started
+**Status:** ✅ Completed (42/42 points — 100% velocity)
 
 ### User Stories (42 points)
 
 | ID | Story | Points | Owner | Status |
 |----|-------|--------|-------|--------|
-| E2-US5 | Timeline Variants — per-timeline entity overrides ([ADR-001](adr/ADR-001-timeline-variants.md)) | 8 | Full Stack | Not Started |
-| E2-US4 | Cross-timeline event indicators (delivered via E2-US5) | — | — | — |
-| E3-US4 | AI consistency checking | 13 | AI/ML Lead | Not Started |
-| E3-US5 | Ripple effect analysis | 21 | AI/ML + Backend | Not Started |
+| E2-US5 | Timeline Variants — per-timeline entity overrides ([ADR-001](adr/ADR-001-timeline-variants.md)) | 8 | Full Stack | ✅ Completed |
+| E2-US4 | Cross-timeline event indicators (delivered via E2-US5) | — | — | ✅ Delivered via E2-US5 |
+| E3-US4 | AI consistency checking | 13 | AI/ML Lead | ✅ Completed |
+| E3-US5 | Ripple effect analysis | 21 | AI/ML + Backend | ✅ Completed |
 
 ### Sprint Backlog Details
 
@@ -267,36 +267,92 @@ gantt
 - Batch AI requests for consistency + ripple analysis
 - Extended AI prompt templates for consistency and ripple tasks
 
+### Sprint 3 Retrospective
+
+**What went well:**
+- Timeline variants delivered with full polymorphic support (all entity types)
+- AI consistency checker found 4 issues (3 planted + 1 bonus) on first run
+- Ripple effect modal provides clear before/after diff and impact predictions
+- Reused existing `getRelatedEntities()` 2-hop traversal — zero new backend work
+- 100% velocity maintained (42/42 points)
+
+**What to improve:**
+- Cross-timeline connector lines deferred (stretch goal) — consider for Sprint 4
+- Entity type sometimes defaults incorrectly during creation (UI issue)
+- Need integration tests for AI features (consistency + ripple)
+
+**Key decisions:**
+- Ripple analysis triggers only on description edits, not positional drags
+- AI temperature set to 0.3 for analytical tasks (consistency, ripple)
+- Modal shows "No Cascading Effects" when entity has no relationships (safe UX)
+
 ---
 
-## Sprint 4: Relationship Graph
-**Dates:** Apr 7 - Apr 18, 2026  
+## Sprint 4: Relationship Graph ✅ COMPLETED
+**Dates:** Feb 12, 2026  
 **Goal:** Dynamic relationships and graph visualization  
-**Demo:** User creates "Alice betrays Bob" relationship, explores 2-hop connections
+**Demo:** User creates "Alice betrays Bob" relationship, explores 2-hop connections, sees relationship graph on canvas  
+**Outcome:** All 4 stories completed (39 points delivered)
 
 ### User Stories (39 points)
 
-| ID | Story | Points | Owner |
-|----|-------|--------|-------|
-| E4-US1 | Create custom relationships | 8 | Full Stack |
-| E4-US2 | Relationship visualization | 5 | Frontend Lead |
-| E4-US3 | Graph traversal queries | 13 | Backend Lead |
-| E4-US4 | Visual relationship graph | 13 | Frontend Lead |
+| ID | Story | Points | Owner | Status |
+|----|-------|--------|-------|--------|
+| E4-US1 | Create custom relationships | 8 | Full Stack | ✅ Completed |
+| E4-US2 | Relationship visualization | 5 | Frontend Lead | ✅ Completed |
+| E4-US3 | Graph traversal queries | 13 | Backend Lead | ✅ Completed |
+| E4-US4 | Visual relationship graph | 13 | Frontend Lead | ✅ Completed |
 
 ### Sprint 4 Deliverables
 
 **✅ Features:**
-1. Drag-and-drop relationship creation
-2. User-defined relationship types
-3. Relationship sidebar on entity view
-4. **"Explore Connections" with depth selector**
-5. Force-directed graph visualization
-6. Filter graph by relationship type
+1. Relationship CRUD — create/edit/delete relationships between any entities
+2. Relationship visualization — curved gradient lines with animated dashes, floating labels, arrow markers
+3. Relationship sidebar — connection list on entity detail view with relationship type badges
+4. Graph traversal queries — PostgreSQL recursive CTE for N-hop exploration
+5. Visual relationship graph on canvas — D3.js force-directed rendering with hover effects
+6. Filter graph by entity type and relationship type
+
+**✅ Canvas Visual Overhaul (Bonus):**
+1. "Mission Control" aesthetic — 300×130 node cards, bold uppercase titles, persistent glow, gradient accent bars
+2. Styled status pills (✔ CONSISTENT / ⚠ HAS WARNINGS)
+3. Full connection badges (🔗 N connections)
+4. 200px swim lanes with 13px bold uppercase headers, glowing separators
+5. 2.5px relationship lines with floating label pills on curves
+6. Stats HUD (⏳ CHRONOS │ NARRATIVE SYSTEMS │ RELATIONS TRACKER)
+7. Time axis ruler with tick marks
+8. ⏳ CHRONOS bottom branding bar
+9. Minimap with viewport rectangle and relationship lines
+10. Parallel timeline visualization — dual layout engine, cross-timeline connectors, focus mode
 
 **✅ Technical:**
-- Relationships table with adjacency list
-- PostgreSQL recursive CTE queries
-- D3.js graph rendering
+- Relationships table with adjacency list (bidirectional storage)
+- PostgreSQL recursive CTE queries (2-hop depth)
+- D3.js relationship line rendering with gradient fills and animated dashes
+- CSS animation fix: `node-enter` uses opacity-only (prevents SVG transform override)
+- Layout recalculation: nodes centered in swim lanes (ignores stale saved positions)
+- Glow filter strengthened (stdDeviation 6)
+- TypeScript: 0 errors across all changes
+
+### Sprint 4 Retrospective
+
+**What went well:**
+- Relationship graph fully integrated into existing canvas — no separate view needed
+- Canvas visual overhaul delivered as bonus scope — significant UX improvement
+- Animated relationship lines (dash-flow) add professional "data flow" feel
+- Recursive CTE graph traversal reused from Sprint 3 — zero new backend work
+- All 39 points delivered at 100% velocity
+
+**What to improve:**
+- CSS `transform` on SVG `<g>` elements caused node overlap — caught during verification, fixed by converting animation to opacity-only
+- Saved entity positions from old node size (220×88) conflicted with new size (300×130) — layout now always recalculates
+- Need automated visual regression tests for canvas rendering
+
+**Key decisions:**
+- Layout engine always recalculates positions (ignores stale saved positions) to prevent overlap
+- Glow effects use SVG filter (feGaussianBlur) rather than CSS box-shadow for consistency
+- Relationship labels rendered as floating pills on curve midpoint
+- Time axis added as decorative ruler (not yet data-driven)
 
 ---
 
@@ -618,14 +674,16 @@ gantt
 | Sprint | Planned Points | Completed Points | Velocity |
 |--------|---------------|------------------|----------|
 | 1 | 42 | 42 | 42 |
-| 2 | 42 | — | — |
-| 3 | 39 | TBD | TBD |
-| 4 | 39 | TBD | TBD |
+| 2 | 42 | 42 | 42 |
+| 3 | 42 | 42 | 42 |
+| 4 | 39 | 39 | 39 |
 | 5 | 37 | TBD | TBD |
 | 6 | 38 | TBD | TBD |
 
 **Adjustment Strategy:** If velocity <80% planned, reduce subsequent sprint capacity by 20%.  
-**Sprint 1 Notes:** All 6 stories completed at 100% velocity. Team delivered full vertical slice.
+**Sprint 1 Notes:** All 6 stories completed at 100% velocity. Team delivered full vertical slice.  
+**Sprint 3 Notes:** All 3 stories completed at 100% velocity. Timeline variants, AI consistency checking, and ripple effect analysis all delivered.  
+**Sprint 4 Notes:** All 4 stories completed at 100% velocity. Relationship graph + canvas visual overhaul delivered as bonus scope.
 
 ---
 

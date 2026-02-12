@@ -1,11 +1,11 @@
 # Chronos: Product Backlog
 **Scrum Master Documentation**
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Last Updated:** February 12, 2026  
 **Sprint Duration:** 2 weeks  
 **Total Sprints:** 6 (12 weeks / 60 working days)  
-**Team Velocity:** 42 story points (Sprint 1 actual)
+**Team Velocity:** 41 story points avg (Sprints 1-4 actual)
 
 ---
 
@@ -257,7 +257,7 @@ graph LR
 
 ---
 
-#### E2-US5: Timeline Variants — Per-Timeline Entity Overrides — *Sprint 3*
+#### E2-US5: Timeline Variants — Per-Timeline Entity Overrides — *Sprint 3* ✅ COMPLETED
 **As a** writer  
 **I want to** define how any entity (character, event, location, arc, theme) differs across timelines  
 **So that** I can model divergent realities where the same entity has timeline-specific variations
@@ -350,7 +350,7 @@ graph LR
 
 ---
 
-#### E3-US4: Consistency Checking
+#### E3-US4: Consistency Checking — *Sprint 3* ✅ COMPLETED
 **As a** writer  
 **I want to** check my narrative for logical inconsistencies  
 **So that** I can avoid plot holes
@@ -368,7 +368,7 @@ graph LR
 
 ---
 
-#### E3-US5: Ripple Effect Analysis (Antigravity Feature)
+#### E3-US5: Ripple Effect Analysis (Antigravity Feature) — *Sprint 3* ✅ COMPLETED
 **As a** writer  
 **I want to** see the impact of changing a critical event  
 **So that** I can maintain narrative consistency
@@ -393,7 +393,7 @@ graph LR
 
 ### Epic 4: Relationship Graph
 
-#### E4-US1: Create Custom Relationships
+#### E4-US1: Create Custom Relationships ✅ *Completed Sprint 4*
 **As a** writer  
 **I want to** define custom relationships between entities  
 **So that** I can capture nuanced story connections
@@ -411,7 +411,7 @@ graph LR
 
 ---
 
-#### E4-US2: Relationship Visualization
+#### E4-US2: Relationship Visualization ✅ *Completed Sprint 4*
 **As a** writer  
 **I want to** see all relationships for an entity  
 **So that** I understand its connections
@@ -429,7 +429,7 @@ graph LR
 
 ---
 
-#### E4-US3: Graph Traversal Queries
+#### E4-US3: Graph Traversal Queries ✅ *Completed Sprint 4*
 **As a** writer  
 **I want to** find all entities connected to a character within N hops  
 **So that** I can explore my narrative web
@@ -451,7 +451,7 @@ graph LR
 
 ---
 
-#### E4-US4: Visual Relationship Graph
+#### E4-US4: Visual Relationship Graph ✅ *Completed Sprint 4*
 **As a** writer  
 **I want to** see a visual graph of entity connections  
 **So that** I can understand complex relationships at a glance

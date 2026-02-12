@@ -3,11 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAppStore, resolveEntity } from '../store/appStore';
-import type { Entity } from '../store/appStore';
+import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import TimelineCanvas from '../components/TimelineCanvas';
-import { generateIdeas, hasConfiguredProvider } from '../services/aiService';
-import type { GeneratedIdea, GenerateIdeasResult } from '../services/aiService';
+import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
+import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport } from '../services/aiService';
 
 const ENTITY_ICONS: Record<string, string> = {
     character: '👤',
@@ -69,12 +69,32 @@ export default function WorkspacePage() {
 
     // Timeline visibility toggles
     const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
-
+    const [viewMode, setViewMode] = useState<'type' | 'timeline'>('type');
     // Variant editing state
-    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants'>('details');
+    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants' | 'relationships'>('details');
     const [editingVariantTimeline, setEditingVariantTimeline] = useState<string | null>(null);
     const [variantNameVal, setVariantNameVal] = useState('');
     const [variantDescVal, setVariantDescVal] = useState('');
+
+    // Consistency checking state (E3-US4)
+    const [consistencyReport, setConsistencyReport] = useState<ConsistencyReport | null>(null);
+    const [isCheckingConsistency, setIsCheckingConsistency] = useState(false);
+    const [consistencyError, setConsistencyError] = useState<string | null>(null);
+    const [showConsistencyReport, setShowConsistencyReport] = useState(false);
+
+    // Ripple effect analysis state (E3-US5)
+    const [rippleReport, setRippleReport] = useState<RippleReport | null>(null);
+    const [isAnalyzingRipple, setIsAnalyzingRipple] = useState(false);
+    const [showRippleModal, setShowRippleModal] = useState(false);
+    const [pendingSaveField, setPendingSaveField] = useState<string | null>(null);
+    const [rippleError, setRippleError] = useState<string | null>(null);
+
+    // Relationship state (Sprint 4)
+    const [showCreateRelModal, setShowCreateRelModal] = useState(false);
+    const [relFromId, setRelFromId] = useState<string | null>(null);
+    const [relToId, setRelToId] = useState<string | null>(null);
+    const [relType, setRelType] = useState('involves');
+    const [relLabel, setRelLabel] = useState('');
 
     // Fetch project
     const { data: projectData } = useQuery({
@@ -120,6 +140,14 @@ export default function WorkspacePage() {
         queryFn: () => api.getVariants(selectedEntity!.id),
         enabled: !!selectedEntity,
     });
+
+    // Fetch relationships for the project
+    const { data: relationshipsData } = useQuery({
+        queryKey: ['relationships', projectId],
+        queryFn: () => api.getRelationships(projectId!),
+        enabled: !!projectId,
+    });
+    const projectRelationships = (relationshipsData?.relationships || []) as Relationship[];
 
     // Create entity
     const createEntity = useMutation({
@@ -171,13 +199,35 @@ export default function WorkspacePage() {
         },
     });
 
+    // Create relationship (Sprint 4)
+    const createRelationship = useMutation({
+        mutationFn: (body: { from_entity_id: string; to_entity_id: string; relationship_type: string; label?: string }) =>
+            api.createRelationship(projectId!, body),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['relationships', projectId] });
+            setShowCreateRelModal(false);
+            setRelFromId(null);
+            setRelToId(null);
+            setRelType('involves');
+            setRelLabel('');
+        },
+    });
+
+    // Delete relationship (Sprint 4)
+    const deleteRelationship = useMutation({
+        mutationFn: (id: string) => api.deleteRelationship(id),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['relationships', projectId] });
+        },
+    });
+
     // Position update callback (E2-US3: drag persistence)
     const handlePositionUpdate = useCallback((entityId: string, x: number, y: number) => {
         updateEntity.mutate({ id: entityId, body: { position_x: x, position_y: y } });
     }, [updateEntity]);
 
-    // Entity field save
-    const handleSaveField = (field: string) => {
+    // Entity field save (with ripple analysis interception for E3-US5)
+    const commitSave = (field: string) => {
         if (!selectedEntity) return;
         const body: Record<string, string> = {};
         if (field === 'name') body.name = editNameVal;
@@ -191,6 +241,75 @@ export default function WorkspacePage() {
                 },
             }
         );
+    };
+
+    const handleSaveField = async (field: string) => {
+        if (!selectedEntity) return;
+
+        // Only intercept description changes when AI is configured
+        if (field === 'description' && aiConfigured && editDescVal !== (selectedEntity.description || '')) {
+            setPendingSaveField(field);
+            setIsAnalyzingRipple(true);
+            setRippleError(null);
+            setRippleReport(null);
+            setShowRippleModal(true);
+
+            try {
+                // Get related entities using graph traversal
+                const { entities: related, paths } = await api.getRelatedEntities(
+                    selectedEntity.id, 2, projectId
+                );
+
+                // Build relationship type map
+                const relMap: Record<string, string> = {};
+                for (const p of paths) {
+                    if (p.from === selectedEntity.id) relMap[p.to] = p.type;
+                    if (p.to === selectedEntity.id) relMap[p.from] = p.type;
+                }
+
+                const report = await analyzeRippleEffects({
+                    editedEntity: {
+                        name: selectedEntity.name,
+                        type: selectedEntity.entity_type,
+                        descriptionBefore: selectedEntity.description || '',
+                        descriptionAfter: editDescVal,
+                    },
+                    relatedEntities: related.map(e => ({
+                        name: e.name,
+                        type: e.entity_type,
+                        description: e.description || '',
+                        relationshipType: relMap[e.id] || 'related',
+                    })),
+                    projectName: currentProject?.name || 'Unknown',
+                });
+
+                setRippleReport(report);
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : 'Analysis failed';
+                setRippleError(msg);
+            } finally {
+                setIsAnalyzingRipple(false);
+            }
+        } else {
+            // No interception needed — save directly
+            commitSave(field);
+        }
+    };
+
+    const handleRippleProceed = () => {
+        if (pendingSaveField) {
+            commitSave(pendingSaveField);
+        }
+        setShowRippleModal(false);
+        setPendingSaveField(null);
+        setRippleReport(null);
+    };
+
+    const handleRippleCancel = () => {
+        setShowRippleModal(false);
+        setPendingSaveField(null);
+        setRippleReport(null);
+        setRippleError(null);
     };
 
     // Save variant override
@@ -268,6 +387,48 @@ export default function WorkspacePage() {
             else next.add(type);
             return next;
         });
+    };
+
+    // AI consistency checking (E3-US4)
+    const handleCheckConsistency = async () => {
+        if (isCheckingConsistency) return;
+        setIsCheckingConsistency(true);
+        setConsistencyError(null);
+
+        try {
+            const entitiesToCheck = allEntities.map(e => ({
+                name: e.name,
+                type: e.entity_type,
+                description: e.description,
+                properties: e.properties as Record<string, unknown> | undefined,
+            }));
+
+            const report = await checkConsistency({
+                entities: entitiesToCheck,
+                projectName: currentProject?.name || 'Untitled Project',
+                scope: focusedTimelineId ? 'timeline' : 'project',
+                scopeTimelineName: focusedTimelineId
+                    ? timelines.find(t => t.id === focusedTimelineId)?.name
+                    : undefined,
+            });
+
+            setConsistencyReport(report);
+            setShowConsistencyReport(true);
+        } catch (err) {
+            setConsistencyError(err instanceof Error ? err.message : 'Consistency check failed');
+            setShowConsistencyReport(true);
+        } finally {
+            setIsCheckingConsistency(false);
+        }
+    };
+
+    // Navigate to entity by name (for consistency report)
+    const navigateToEntityByName = (name: string) => {
+        const entity = allEntities.find(e => e.name.toLowerCase() === name.toLowerCase());
+        if (entity) {
+            setSelectedEntity(entity);
+            setActiveDetailTab('details');
+        }
     };
 
     const allEntities = allEntitiesData?.entities || [];
@@ -394,6 +555,89 @@ export default function WorkspacePage() {
                     </div>
                 )}
 
+                {/* View Mode Toggle */}
+                {timelines.length > 0 && (
+                    <div style={{ padding: '0 var(--space-2) var(--space-1)' }}>
+                        <div style={{
+                            display: 'flex', gap: 0, borderRadius: 'var(--radius-md)',
+                            background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                            overflow: 'hidden',
+                        }}>
+                            <button
+                                onClick={() => setViewMode('type')}
+                                style={{
+                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                    fontWeight: viewMode === 'type' ? 600 : 400,
+                                    background: viewMode === 'type' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                    color: viewMode === 'type' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                    border: 'none', cursor: 'pointer',
+                                    borderRight: '1px solid var(--border)',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                📊 Type View
+                            </button>
+                            <button
+                                onClick={() => setViewMode('timeline')}
+                                style={{
+                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                    fontWeight: viewMode === 'timeline' ? 600 : 400,
+                                    background: viewMode === 'timeline' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                    color: viewMode === 'timeline' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                    border: 'none', cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                🔀 Timeline View
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* AI Consistency Check Button (E3-US4) */}
+                <div style={{ padding: '0 var(--space-2) var(--space-1)' }}>
+                    <button
+                        className="btn btn-sm"
+                        onClick={aiConfigured ? handleCheckConsistency : () => navigate('/settings')}
+                        disabled={aiConfigured && (isCheckingConsistency || allEntities.length === 0)}
+                        title={!aiConfigured ? 'Configure an AI API key in Settings first' : undefined}
+                        style={{
+                            width: '100%',
+                            fontSize: 'var(--text-xs)',
+                            padding: '6px 10px',
+                            background: !aiConfigured ? 'var(--bg-secondary)'
+                                : consistencyReport && !consistencyError
+                                    ? (consistencyReport.issues.length === 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.08)')
+                                    : 'var(--bg-secondary)',
+                            border: !aiConfigured ? '1px solid var(--border)'
+                                : consistencyReport && !consistencyError
+                                    ? (consistencyReport.issues.length === 0 ? '1px solid rgba(16,185,129,0.3)' : '1px solid rgba(239,68,68,0.2)')
+                                    : '1px solid var(--border)',
+                            color: !aiConfigured ? 'var(--text-tertiary)'
+                                : isCheckingConsistency ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+                            borderRadius: 'var(--radius-md)',
+                            cursor: isCheckingConsistency ? 'wait' : 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                            transition: 'all 0.2s',
+                        }}
+                    >
+                        {!aiConfigured ? (
+                            '🔍 Check Consistency (Set API Key →)'
+                        ) : isCheckingConsistency ? (
+                            <><div className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} /> Analyzing...</>
+                        ) : consistencyReport && !consistencyError ? (
+                            consistencyReport.issues.length === 0 ? '✅ No Issues Found' : `🔍 ${consistencyReport.issues.length} Issue${consistencyReport.issues.length !== 1 ? 's' : ''} Found`
+                        ) : (
+                            '🔍 Check Consistency'
+                        )}
+                    </button>
+                    {consistencyError && (
+                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--error)', marginTop: 4, padding: '4px 8px', background: 'rgba(239,68,68,0.08)', borderRadius: 'var(--radius-sm)' }}>
+                            {consistencyError}
+                        </div>
+                    )}
+                </div>
+
                 {/* Timeline Visibility Toggles */}
                 {entityTypes.length > 1 && (
                     <div style={{ padding: '0 var(--space-2) var(--space-1)', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -483,14 +727,128 @@ export default function WorkspacePage() {
 
             {/* ─── Main Content ──────────────────────────────── */}
             <main className="main-content" style={{ padding: 0, display: 'flex', flexDirection: 'column' }}>
+                {/* Consistency Report Panel (E3-US4) */}
+                {showConsistencyReport && consistencyReport && consistencyReport.issues.length > 0 && (
+                    <div style={{
+                        borderBottom: '1px solid var(--border)',
+                        background: 'var(--bg-secondary)',
+                        maxHeight: 300, overflowY: 'auto',
+                    }}>
+                        {/* Report header */}
+                        <div style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            padding: '8px 16px',
+                            background: 'rgba(239,68,68,0.05)',
+                            borderBottom: '1px solid var(--border)',
+                            position: 'sticky', top: 0, zIndex: 5,
+                            backdropFilter: 'blur(8px)',
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--text-sm)', fontWeight: 600 }}>
+                                <span>🔍 Consistency Report</span>
+                                <span style={{
+                                    padding: '1px 8px', borderRadius: 'var(--radius-full)',
+                                    fontSize: 'var(--text-xs)', fontWeight: 500,
+                                    background: 'rgba(239,68,68,0.1)', color: 'var(--error)',
+                                }}>
+                                    {consistencyReport.issues.filter(i => i.severity === 'error').length} errors
+                                </span>
+                                <span style={{
+                                    padding: '1px 8px', borderRadius: 'var(--radius-full)',
+                                    fontSize: 'var(--text-xs)', fontWeight: 500,
+                                    background: 'rgba(245,158,11,0.1)', color: '#f59e0b',
+                                }}>
+                                    {consistencyReport.issues.filter(i => i.severity === 'warning').length} warnings
+                                </span>
+                                {consistencyReport.cached && (
+                                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>(cached)</span>
+                                )}
+                            </div>
+                            <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => setShowConsistencyReport(false)}
+                                style={{ fontSize: 12, padding: '2px 8px' }}
+                            >✕ Close</button>
+                        </div>
+
+                        {/* Issue cards */}
+                        <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {consistencyReport.issues.map((issue: ConsistencyIssue) => (
+                                <div
+                                    key={issue.id}
+                                    style={{
+                                        padding: '10px 14px',
+                                        background: 'var(--bg-primary)',
+                                        borderRadius: 'var(--radius-md)',
+                                        border: `1px solid ${issue.severity === 'error' ? 'rgba(239,68,68,0.2)'
+                                            : issue.severity === 'warning' ? 'rgba(245,158,11,0.2)'
+                                                : 'var(--border)'
+                                            }`,
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                                        <span style={{ fontSize: 14 }}>{SEVERITY_ICONS[issue.severity]}</span>
+                                        <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)', flex: 1 }}>{issue.title}</span>
+                                        <span style={{
+                                            fontSize: 'var(--text-xs)', padding: '1px 6px',
+                                            borderRadius: 'var(--radius-full)',
+                                            background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)',
+                                        }}>
+                                            {CATEGORY_LABELS[issue.category]}
+                                        </span>
+                                    </div>
+                                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: '0 0 6px 22px', lineHeight: 1.5 }}>
+                                        {issue.description}
+                                    </p>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 22, flexWrap: 'wrap' }}>
+                                        {/* Affected entities */}
+                                        {issue.entityNames.map((name: string, idx: number) => (
+                                            <button
+                                                key={idx}
+                                                className="btn btn-ghost btn-sm"
+                                                onClick={() => navigateToEntityByName(name)}
+                                                style={{
+                                                    fontSize: 'var(--text-xs)', padding: '1px 6px',
+                                                    color: 'var(--accent)', textDecoration: 'underline',
+                                                    cursor: 'pointer',
+                                                }}
+                                            >
+                                                {name}
+                                            </button>
+                                        ))}
+                                        {/* Suggested fix */}
+                                        {issue.suggestedFix && (
+                                            <span style={{
+                                                fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)',
+                                                fontStyle: 'italic', marginLeft: 'auto',
+                                            }}>
+                                                💡 {issue.suggestedFix}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
                 {!selectedEntity ? (
                     <div style={{ flex: 1, position: 'relative' }}>
                         <TimelineCanvas
                             entities={canvasEntities}
+                            relationships={projectRelationships}
                             onEntitySelect={setSelectedEntity}
                             selectedEntityId={null}
                             onEntityPositionUpdate={handlePositionUpdate}
                             hiddenTypes={hiddenTypes}
+                            viewMode={viewMode}
+                            focusedTimelineId={focusedTimelineId}
+                            variants={allVariants}
+                            timelines={timelines}
+                            onCreateRelationship={(fromId, toId) => {
+                                setRelFromId(fromId);
+                                setRelToId(toId);
+                                setShowCreateRelModal(true);
+                            }}
                         />
                         {/* Focus mode banner */}
                         {focusedTimelineId && (
@@ -566,8 +924,8 @@ export default function WorkspacePage() {
                                 </button>
                             </div>
 
-                            {/* Tab Selector: Details | Variants */}
-                            {selectedEntity.entity_type !== 'timeline' && timelines.length > 0 && (
+                            {/* Tab Selector: Details | Variants | Relationships */}
+                            {selectedEntity.entity_type !== 'timeline' && (
                                 <div style={{
                                     display: 'flex', gap: 0, marginBottom: 'var(--space-3)',
                                     borderBottom: '2px solid var(--border)',
@@ -584,26 +942,54 @@ export default function WorkspacePage() {
                                     >
                                         📋 Details
                                     </button>
+                                    {timelines.length > 0 && (
+                                        <button
+                                            onClick={() => setActiveDetailTab('variants')}
+                                            style={{
+                                                padding: '8px 16px', fontSize: 'var(--text-sm)', fontWeight: 500,
+                                                background: 'none', border: 'none', cursor: 'pointer',
+                                                color: activeDetailTab === 'variants' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                                borderBottom: activeDetailTab === 'variants' ? '2px solid var(--accent)' : '2px solid transparent',
+                                                marginBottom: -2, transition: 'all 0.15s',
+                                                display: 'flex', alignItems: 'center', gap: 6,
+                                            }}
+                                        >
+                                            🔀 Timeline Variants
+                                            {entityVariants.length > 0 && (
+                                                <span style={{
+                                                    fontSize: 'var(--text-xs)', padding: '0 6px',
+                                                    borderRadius: 'var(--radius-full)',
+                                                    background: 'rgba(99,102,241,0.15)', color: 'var(--accent)',
+                                                    fontWeight: 600,
+                                                }}>{entityVariants.length}</span>
+                                            )}
+                                        </button>
+                                    )}
                                     <button
-                                        onClick={() => setActiveDetailTab('variants')}
+                                        onClick={() => setActiveDetailTab('relationships')}
                                         style={{
                                             padding: '8px 16px', fontSize: 'var(--text-sm)', fontWeight: 500,
                                             background: 'none', border: 'none', cursor: 'pointer',
-                                            color: activeDetailTab === 'variants' ? 'var(--accent)' : 'var(--text-tertiary)',
-                                            borderBottom: activeDetailTab === 'variants' ? '2px solid var(--accent)' : '2px solid transparent',
+                                            color: activeDetailTab === 'relationships' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                            borderBottom: activeDetailTab === 'relationships' ? '2px solid var(--accent)' : '2px solid transparent',
                                             marginBottom: -2, transition: 'all 0.15s',
                                             display: 'flex', alignItems: 'center', gap: 6,
                                         }}
                                     >
-                                        🔀 Timeline Variants
-                                        {entityVariants.length > 0 && (
-                                            <span style={{
-                                                fontSize: 'var(--text-xs)', padding: '0 6px',
-                                                borderRadius: 'var(--radius-full)',
-                                                background: 'rgba(99,102,241,0.15)', color: 'var(--accent)',
-                                                fontWeight: 600,
-                                            }}>{entityVariants.length}</span>
-                                        )}
+                                        🔗 Relationships
+                                        {(() => {
+                                            const count = projectRelationships.filter(r =>
+                                                r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id
+                                            ).length;
+                                            return count > 0 ? (
+                                                <span style={{
+                                                    fontSize: 'var(--text-xs)', padding: '0 6px',
+                                                    borderRadius: 'var(--radius-full)',
+                                                    background: 'rgba(99,102,241,0.15)', color: 'var(--accent)',
+                                                    fontWeight: 600,
+                                                }}>{count}</span>
+                                            ) : null;
+                                        })()}
                                     </button>
                                 </div>
                             )}
@@ -946,6 +1332,104 @@ export default function WorkspacePage() {
                                     )}
                                 </div>
                             )}
+
+                            {/* ─── Relationships Tab (Sprint 4) ─── */}
+                            {activeDetailTab === 'relationships' && (
+                                <div>
+                                    <div style={{
+                                        padding: 'var(--space-2)',
+                                        background: 'linear-gradient(135deg, rgba(99,102,241,0.06), rgba(6,182,212,0.04))',
+                                        borderRadius: 'var(--radius-md)',
+                                        border: '1px solid rgba(99,102,241,0.1)',
+                                        marginBottom: 'var(--space-3)',
+                                        fontSize: 'var(--text-sm)', color: 'var(--text-secondary)',
+                                    }}>
+                                        Connections for <strong>{selectedEntity.name}</strong>. Add relationships to other entities.
+                                    </div>
+
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        style={{ width: '100%', marginBottom: 'var(--space-3)' }}
+                                        onClick={() => {
+                                            setRelFromId(selectedEntity.id);
+                                            setRelToId(null);
+                                            setShowCreateRelModal(true);
+                                        }}
+                                    >
+                                        + Add Relationship
+                                    </button>
+
+                                    {/* Relationship list */}
+                                    {(() => {
+                                        const entityRels = projectRelationships.filter(r =>
+                                            r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id
+                                        );
+                                        if (entityRels.length === 0) {
+                                            return (
+                                                <p style={{
+                                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
+                                                    textAlign: 'center', padding: 'var(--space-3)',
+                                                }}>
+                                                    No relationships yet. Click "Add Relationship" to connect this entity.
+                                                </p>
+                                            );
+                                        }
+                                        return entityRels.map(rel => {
+                                            const isOutgoing = rel.from_entity_id === selectedEntity.id;
+                                            const otherId = isOutgoing ? rel.to_entity_id : rel.from_entity_id;
+                                            const other = allEntities.find((e: Entity) => e.id === otherId);
+                                            return (
+                                                <div key={rel.id} style={{
+                                                    display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                                                    padding: '8px 12px',
+                                                    borderRadius: 'var(--radius-md)',
+                                                    background: 'rgba(255,255,255,0.02)',
+                                                    border: '1px solid var(--border)',
+                                                    marginBottom: 6,
+                                                }}>
+                                                    <span style={{ fontSize: 10, color: 'var(--text-tertiary)', minWidth: 16 }}>
+                                                        {isOutgoing ? '→' : '←'}
+                                                    </span>
+                                                    <span style={{ fontSize: 16 }}>
+                                                        {ENTITY_ICONS[other?.entity_type || 'note']}
+                                                    </span>
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <div style={{
+                                                            fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--text-primary)',
+                                                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                        }}>
+                                                            {other?.name || 'Unknown'}
+                                                        </div>
+                                                        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                                            <span style={{
+                                                                fontSize: 9, padding: '1px 6px',
+                                                                borderRadius: 'var(--radius-full)',
+                                                                background: 'rgba(99,102,241,0.1)',
+                                                                color: 'var(--accent)',
+                                                            }}>
+                                                                {rel.relationship_type}
+                                                            </span>
+                                                            {rel.label && (
+                                                                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+                                                                    {rel.label}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        className="btn btn-ghost btn-sm"
+                                                        title="Delete relationship"
+                                                        style={{ padding: 2, fontSize: 12, color: 'var(--text-tertiary)' }}
+                                                        onClick={() => deleteRelationship.mutate(rel.id)}
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </div>
+                                            );
+                                        });
+                                    })()}
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
@@ -1087,6 +1571,252 @@ export default function WorkspacePage() {
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Ripple Effect Preview Modal (E3-US5) */}
+            {showRippleModal && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 9999,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+                }}>
+                    <div style={{
+                        background: 'var(--bg-primary)', border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-lg)', maxWidth: 620, width: '90%',
+                        maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+                        boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                    }}>
+                        {/* Header */}
+                        <div style={{
+                            padding: '16px 20px', borderBottom: '1px solid var(--border)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 20 }}>⚡</span>
+                                <div>
+                                    <div style={{ fontWeight: 700, fontSize: 'var(--text-base)' }}>Ripple Effect Preview</div>
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                                        Editing: {selectedEntity?.name}
+                                    </div>
+                                </div>
+                            </div>
+                            <button className="btn btn-ghost btn-sm" onClick={handleRippleCancel}
+                                style={{ fontSize: 16, padding: '2px 6px' }}>✕</button>
+                        </div>
+
+                        {/* Content */}
+                        <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}>
+                            {/* Description diff */}
+                            <div style={{
+                                marginBottom: 16, padding: 12, borderRadius: 'var(--radius-md)',
+                                background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                                fontSize: 'var(--text-xs)',
+                            }}>
+                                <div style={{ color: 'var(--text-tertiary)', marginBottom: 6, fontWeight: 600 }}>Description Change:</div>
+                                <div style={{ color: 'rgba(239,68,68,0.8)', textDecoration: 'line-through', marginBottom: 4 }}>
+                                    {selectedEntity?.description?.slice(0, 150) || '(empty)'}{(selectedEntity?.description?.length || 0) > 150 ? '...' : ''}
+                                </div>
+                                <div style={{ color: 'rgba(16,185,129,0.9)' }}>
+                                    {editDescVal.slice(0, 150)}{editDescVal.length > 150 ? '...' : ''}
+                                </div>
+                            </div>
+
+                            {/* Loading state */}
+                            {isAnalyzingRipple && (
+                                <div style={{ textAlign: 'center', padding: '32px 0' }}>
+                                    <div className="spinner" style={{ width: 28, height: 28, borderWidth: 2.5, margin: '0 auto 12px' }} />
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)' }}>
+                                        Analyzing cascading effects...
+                                    </div>
+                                    <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)', marginTop: 4 }}>
+                                        Checking related entities for potential impacts
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Error state */}
+                            {rippleError && (
+                                <div style={{
+                                    padding: 12, borderRadius: 'var(--radius-md)',
+                                    background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+                                    color: 'var(--error)', fontSize: 'var(--text-sm)', marginBottom: 12,
+                                }}>
+                                    ⚠️ {rippleError}
+                                </div>
+                            )}
+
+                            {/* Results */}
+                            {rippleReport && !isAnalyzingRipple && (
+                                <>
+                                    {rippleReport.effects.length === 0 ? (
+                                        <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-secondary)' }}>
+                                            <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                                            <div style={{ fontWeight: 600 }}>No Cascading Effects Detected</div>
+                                            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+                                                This change appears safe for related entities.
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div>
+                                            <div style={{
+                                                fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)',
+                                                marginBottom: 8, fontWeight: 600,
+                                            }}>
+                                                {rippleReport.effects.length} predicted impact{rippleReport.effects.length !== 1 ? 's' : ''}:
+                                            </div>
+                                            {rippleReport.effects.map((effect) => (
+                                                <div key={effect.id} style={{
+                                                    padding: '10px 12px', marginBottom: 8,
+                                                    borderRadius: 'var(--radius-md)',
+                                                    background: effect.impactLevel === 'high' ? 'rgba(239,68,68,0.06)'
+                                                        : effect.impactLevel === 'medium' ? 'rgba(234,179,8,0.06)'
+                                                            : 'rgba(16,185,129,0.06)',
+                                                    border: `1px solid ${effect.impactLevel === 'high' ? 'rgba(239,68,68,0.2)'
+                                                        : effect.impactLevel === 'medium' ? 'rgba(234,179,8,0.2)'
+                                                            : 'rgba(16,185,129,0.2)'}`,
+                                                }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                                        <span>{IMPACT_ICONS[effect.impactLevel]}</span>
+                                                        <span style={{
+                                                            fontWeight: 600, fontSize: 'var(--text-sm)',
+                                                            color: 'var(--text-primary)',
+                                                        }}>
+                                                            {effect.affectedEntityName}
+                                                        </span>
+                                                        <span style={{
+                                                            fontSize: 10, padding: '1px 6px',
+                                                            borderRadius: 'var(--radius-sm)',
+                                                            background: 'var(--bg-tertiary)',
+                                                            color: 'var(--text-tertiary)', textTransform: 'uppercase',
+                                                        }}>
+                                                            {effect.impactLevel}
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: 4 }}>
+                                                        {effect.description}
+                                                    </div>
+                                                    {effect.suggestedAdjustment && (
+                                                        <div style={{
+                                                            fontSize: 'var(--text-xs)', color: 'var(--accent)',
+                                                            display: 'flex', alignItems: 'flex-start', gap: 4, marginTop: 4,
+                                                        }}>
+                                                            <span>💡</span> {effect.suggestedAdjustment}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
+                        {/* Actions */}
+                        <div style={{
+                            padding: '12px 20px', borderTop: '1px solid var(--border)',
+                            display: 'flex', justifyContent: 'flex-end', gap: 8,
+                        }}>
+                            <button className="btn btn-secondary btn-sm" onClick={handleRippleCancel}
+                                disabled={isAnalyzingRipple}>
+                                Cancel
+                            </button>
+                            <button className="btn btn-primary btn-sm" onClick={handleRippleProceed}
+                                disabled={isAnalyzingRipple}
+                                style={{
+                                    background: rippleReport && rippleReport.effects.length > 0
+                                        ? 'rgba(234,179,8,0.9)' : 'var(--accent)',
+                                    borderColor: rippleReport && rippleReport.effects.length > 0
+                                        ? 'rgba(234,179,8,1)' : 'var(--accent)',
+                                }}>
+                                {isAnalyzingRipple ? 'Analyzing...' : rippleReport && rippleReport.effects.length > 0
+                                    ? '⚠️ Save Anyway' : '✅ Save'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ─── Create Relationship Modal (Sprint 4) ─── */}
+            {showCreateRelModal && (
+                <div className="modal-backdrop" onClick={() => setShowCreateRelModal(false)}>
+                    <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+                        <h3 style={{ marginBottom: 'var(--space-3)' }}>🔗 Create Relationship</h3>
+
+                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                            From Entity
+                        </label>
+                        <select
+                            className="input"
+                            value={relFromId || ''}
+                            onChange={(e) => setRelFromId(e.target.value || null)}
+                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                        >
+                            <option value="">— select —</option>
+                            {allEntities.map((e: Entity) => (
+                                <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
+                            ))}
+                        </select>
+
+                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                            To Entity
+                        </label>
+                        <select
+                            className="input"
+                            value={relToId || ''}
+                            onChange={(e) => setRelToId(e.target.value || null)}
+                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                        >
+                            <option value="">— select —</option>
+                            {allEntities.filter((e: Entity) => e.id !== relFromId).map((e: Entity) => (
+                                <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
+                            ))}
+                        </select>
+
+                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                            Type
+                        </label>
+                        <select
+                            className="input"
+                            value={relType}
+                            onChange={(e) => setRelType(e.target.value)}
+                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                        >
+                            {['involves', 'causes', 'blocks', 'references', 'inspires', 'parent_of', 'sibling_of'].map(t => (
+                                <option key={t} value={t}>{t}</option>
+                            ))}
+                        </select>
+
+                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                            Label (optional)
+                        </label>
+                        <input
+                            className="input"
+                            placeholder="e.g. defeats, mentors, discovers"
+                            value={relLabel}
+                            onChange={(e) => setRelLabel(e.target.value)}
+                            style={{ width: '100%', marginBottom: 'var(--space-3)' }}
+                        />
+
+                        <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
+                            <button className="btn btn-ghost" onClick={() => setShowCreateRelModal(false)}>Cancel</button>
+                            <button
+                                className="btn btn-primary"
+                                disabled={!relFromId || !relToId || relFromId === relToId}
+                                onClick={() => {
+                                    if (!relFromId || !relToId) return;
+                                    createRelationship.mutate({
+                                        from_entity_id: relFromId,
+                                        to_entity_id: relToId,
+                                        relationship_type: relType,
+                                        label: relLabel || undefined,
+                                    });
+                                }}
+                            >
+                                {createRelationship.isPending ? 'Creating…' : 'Create'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
