@@ -203,7 +203,7 @@ graph LR
 
 ---
 
-#### E2-US2: Multi-Timeline View — *Sprint 2*
+#### E2-US2: Multi-Timeline View — *Sprint 2* ✅ COMPLETED
 **As a** writer  
 **I want to** view multiple timelines in parallel  
 **So that** I can see how different storylines intersect
@@ -221,7 +221,7 @@ graph LR
 
 ---
 
-#### E2-US3: Event Drag-and-Drop on Timeline — *Sprint 2*
+#### E2-US3: Event Drag-and-Drop on Timeline — *Sprint 2* ✅ COMPLETED
 **As a** writer  
 **I want to** drag events to different positions on the timeline  
 **So that** I can easily reorganize my narrative
@@ -285,7 +285,7 @@ graph LR
 
 ### Epic 3: AI-Powered Intelligence
 
-#### E3-US1: Multi-AI Provider Setup — *Sprint 2*
+#### E3-US1: Multi-AI Provider Setup — *Sprint 2* ✅ COMPLETED
 **As a** system  
 **I want to** support multiple AI providers  
 **So that** we have redundancy and cost optimization
@@ -308,7 +308,7 @@ graph LR
 
 ---
 
-#### E3-US2: AI Model Selection UI — *Sprint 2*
+#### E3-US2: AI Model Selection UI — *Sprint 2* ✅ COMPLETED
 **As a** writer  
 **I want to** choose which AI model to use  
 **So that** I can optimize for cost or quality
@@ -326,7 +326,7 @@ graph LR
 
 ---
 
-#### E3-US3: AI Idea Generation — *Sprint 2*
+#### E3-US3: AI Idea Generation — *Sprint 2* ✅ COMPLETED
 **As a** writer  
 **I want to** generate creative ideas based on my characters and events  
 **So that** I can overcome writer's block
