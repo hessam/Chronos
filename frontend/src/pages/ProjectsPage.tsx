@@ -19,13 +19,13 @@ export default function ProjectsPage() {
     // Fetch projects
     const { data, isLoading } = useQuery({
         queryKey: ['projects'],
-        queryFn: () => api.get<{ projects: Project[] }>('/projects'),
+        queryFn: () => api.getProjects(),
     });
 
     // Create project
     const createMutation = useMutation({
         mutationFn: (body: { name: string; description: string }) =>
-            api.post<{ project: Project }>('/projects', body),
+            api.createProject(body),
         onSuccess: (data) => {
             queryClient.invalidateQueries({ queryKey: ['projects'] });
             setShowCreate(false);
@@ -38,7 +38,7 @@ export default function ProjectsPage() {
 
     // Delete project
     const deleteMutation = useMutation({
-        mutationFn: (id: string) => api.delete(`/projects/${id}`),
+        mutationFn: (id: string) => api.deleteProject(id),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
     });
 

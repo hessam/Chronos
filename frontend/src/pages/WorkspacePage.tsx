@@ -48,7 +48,7 @@ export default function WorkspacePage() {
     // Fetch project
     const { data: projectData } = useQuery({
         queryKey: ['project', projectId],
-        queryFn: () => api.get<{ project: Project }>(`/projects/${projectId}`),
+        queryFn: () => api.getProject(projectId!),
         enabled: !!projectId,
     });
 
@@ -61,19 +61,18 @@ export default function WorkspacePage() {
     const entityQueryKey = ['entities', projectId, entityFilter, searchQuery];
     const { data: entitiesData, isLoading: entitiesLoading } = useQuery({
         queryKey: entityQueryKey,
-        queryFn: () => {
-            let path = `/projects/${projectId}/entities?limit=100`;
-            if (entityFilter !== 'all') path += `&type=${entityFilter}`;
-            if (searchQuery) path += `&search=${encodeURIComponent(searchQuery)}`;
-            return api.get<{ entities: Entity[] }>(path);
-        },
+        queryFn: () => api.getEntities(projectId!, {
+            type: entityFilter !== 'all' ? entityFilter : undefined,
+            search: searchQuery || undefined,
+            limit: 100,
+        }),
         enabled: !!projectId,
     });
 
     // Create entity
     const createEntity = useMutation({
         mutationFn: (body: { entity_type: string; name: string; description: string; properties: Record<string, unknown> }) =>
-            api.post<{ entity: Entity }>(`/projects/${projectId}/entities`, body),
+            api.createEntity(projectId!, body),
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['entities', projectId] });
             setShowCreateEntity(false);
@@ -85,7 +84,7 @@ export default function WorkspacePage() {
 
     // Delete entity
     const deleteEntity = useMutation({
-        mutationFn: (id: string) => api.delete(`/projects/entities/${id}`),
+        mutationFn: (id: string) => api.deleteEntity(id),
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['entities', projectId] });
             setSelectedEntity(null);
