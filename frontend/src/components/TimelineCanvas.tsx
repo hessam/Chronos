@@ -955,36 +955,65 @@ export default function TimelineCanvas({
             });
         }
 
-        // --- Temporal gap labels between timestamped events (Feature 12) ---
+        // --- Temporal gap labels between timestamped events (Feature 12 — Story Calendar) ---
         {
+            // Parse story-time object or legacy ISO string into sortable numeric value
+            const parseStoryTime = (ts: unknown): { totalDays: number; display: string } | null => {
+                if (!ts) return null;
+                // New story-time object: { year, day, hour, label }
+                if (typeof ts === 'object' && ts !== null) {
+                    const obj = ts as Record<string, unknown>;
+                    const year = (obj.year as number) ?? 0;
+                    const day = (obj.day as number) ?? 0;
+                    const hour = (obj.hour as number) ?? 0;
+                    const totalDays = year * 365 + day + hour / 24;
+                    const label = obj.label as string || '';
+                    const display = label ? `Y${year} D${day} — ${label}` : `Y${year} D${day}`;
+                    return { totalDays, display };
+                }
+                // Legacy: ISO date string
+                if (typeof ts === 'string') {
+                    const d = new Date(ts);
+                    if (isNaN(d.getTime())) return null;
+                    const totalDays = d.getTime() / (1000 * 60 * 60 * 24);
+                    return { totalDays, display: ts };
+                }
+                return null;
+            };
+
+            const formatStoryGap = (diffDays: number): string => {
+                const absDays = Math.abs(diffDays);
+                const direction = diffDays >= 0 ? 'later' : 'earlier';
+                if (absDays >= 365) {
+                    const years = Math.round(absDays / 365);
+                    return `${years} year${years > 1 ? 's' : ''} ${direction}`;
+                } else if (absDays >= 30) {
+                    const months = Math.round(absDays / 30);
+                    return `${months} month${months > 1 ? 's' : ''} ${direction}`;
+                } else {
+                    const days = Math.round(absDays);
+                    return `${days} day${days > 1 ? 's' : ''} ${direction}`;
+                }
+            };
+
             const timedEvents = nodes
                 .filter(n => n.entity.entity_type === 'event' && (n.entity.properties as Record<string, unknown>)?.timestamp)
-                .map(n => ({
-                    node: n,
-                    date: new Date((n.entity.properties as Record<string, unknown>).timestamp as string),
-                }))
-                .filter(e => !isNaN(e.date.getTime()))
-                .sort((a, b) => a.date.getTime() - b.date.getTime());
+                .map(n => {
+                    const parsed = parseStoryTime((n.entity.properties as Record<string, unknown>).timestamp);
+                    return parsed ? { node: n, totalDays: parsed.totalDays, display: parsed.display } : null;
+                })
+                .filter((e): e is NonNullable<typeof e> => e !== null)
+                .sort((a, b) => a.totalDays - b.totalDays);
 
             const gapGroup = g.append('g').attr('class', 'temporal-gaps');
 
             for (let i = 0; i < timedEvents.length - 1; i++) {
                 const from = timedEvents[i];
                 const to = timedEvents[i + 1];
-                const diffMs = to.date.getTime() - from.date.getTime();
-                const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-                if (diffDays === 0) continue;
+                const diffDays = to.totalDays - from.totalDays;
+                if (Math.abs(diffDays) < 0.01) continue;
 
-                let label: string;
-                if (diffDays >= 365) {
-                    const years = Math.round(diffDays / 365);
-                    label = `${years} year${years > 1 ? 's' : ''} later`;
-                } else if (diffDays >= 30) {
-                    const months = Math.round(diffDays / 30);
-                    label = `${months} month${months > 1 ? 's' : ''} later`;
-                } else {
-                    label = `${diffDays} day${diffDays > 1 ? 's' : ''} later`;
-                }
+                const label = formatStoryGap(diffDays);
 
                 // Position between the two nodes
                 const midX = (from.node.x + to.node.x) / 2;
@@ -997,9 +1026,9 @@ export default function TimelineCanvas({
                     .attr('y1', from.node.y - NODE_H / 2 - 10)
                     .attr('x2', to.node.x - NODE_W / 2 - 4)
                     .attr('y2', to.node.y - NODE_H / 2 - 10)
-                    .attr('stroke', 'rgba(148,163,184,0.2)')
+                    .attr('stroke', diffDays < 0 ? 'rgba(239,68,68,0.25)' : 'rgba(148,163,184,0.2)')
                     .attr('stroke-width', 1)
-                    .attr('stroke-dasharray', '4 3');
+                    .attr('stroke-dasharray', diffDays < 0 ? '6 3' : '4 3');
 
                 // Label pill background
                 gapGroup.append('rect')
@@ -1008,8 +1037,8 @@ export default function TimelineCanvas({
                     .attr('width', tw)
                     .attr('height', 16)
                     .attr('rx', 8)
-                    .attr('fill', 'rgba(15,23,42,0.85)')
-                    .attr('stroke', 'rgba(148,163,184,0.15)')
+                    .attr('fill', diffDays < 0 ? 'rgba(127,29,29,0.85)' : 'rgba(15,23,42,0.85)')
+                    .attr('stroke', diffDays < 0 ? 'rgba(239,68,68,0.2)' : 'rgba(148,163,184,0.15)')
                     .attr('stroke-width', 0.5);
 
                 // Label text
@@ -1019,7 +1048,7 @@ export default function TimelineCanvas({
                     .attr('text-anchor', 'middle')
                     .attr('font-size', '9px')
                     .attr('font-family', 'Inter, sans-serif')
-                    .attr('fill', 'rgba(148,163,184,0.65)')
+                    .attr('fill', diffDays < 0 ? 'rgba(252,165,165,0.8)' : 'rgba(148,163,184,0.65)')
                     .attr('font-style', 'italic')
                     .text(`⏳ ${label}`);
             }

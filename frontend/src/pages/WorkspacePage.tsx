@@ -861,12 +861,17 @@ export default function WorkspacePage() {
         setTemporalGaps(analyzeTemporalGaps(events));
     };
 
-    // Timestamp save for events (Feature 12)
-    const handleTimestampChange = (timestamp: string) => {
+    // Story-time save for events (Feature 12 — Story Calendar)
+    const handleStoryTimeChange = (field: string, value: number | string) => {
         if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        const current = (selectedEntity.properties as Record<string, unknown>)?.timestamp;
+        const storyTime: Record<string, unknown> = typeof current === 'object' && current !== null
+            ? { ...(current as Record<string, unknown>) }
+            : { year: 0, day: 0, hour: 0, label: '' };
+        storyTime[field] = value;
         updateEntity.mutate({
             id: selectedEntity.id,
-            body: { properties: { ...selectedEntity.properties, timestamp } },
+            body: { properties: { ...selectedEntity.properties, timestamp: storyTime } },
         });
     };
 
@@ -2302,28 +2307,103 @@ export default function WorkspacePage() {
                             );
                         })()}
 
-                        {/* Timestamp (events only — Feature 12) */}
-                        {selectedEntity?.entity_type === 'event' && (
-                            <div style={{
-                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
-                                background: 'rgba(100,116,139,0.06)',
-                                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(100,116,139,0.15)',
-                            }}>
-                                <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
-                                    🕐 Temporal Position
-                                </h4>
-                                <input
-                                    type="date"
-                                    className="input"
-                                    value={((selectedEntity.properties as Record<string, unknown>)?.timestamp as string) || ''}
-                                    onChange={e => handleTimestampChange(e.target.value)}
-                                    style={{ width: '100%', fontSize: 'var(--text-sm)' }}
-                                />
-                                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-                                    Set in-story date for temporal distance tracking
+                        {/* Story Calendar — Temporal Position (events only — Feature 12) */}
+                        {selectedEntity?.entity_type === 'event' && (() => {
+                            const tsRaw = (selectedEntity.properties as Record<string, unknown>)?.timestamp;
+                            const ts: Record<string, unknown> = typeof tsRaw === 'object' && tsRaw !== null
+                                ? (tsRaw as Record<string, unknown>)
+                                : { year: 0, day: 0, hour: 0, label: '' };
+                            // Migrate legacy ISO string timestamps
+                            if (typeof tsRaw === 'string' && tsRaw) {
+                                const d = new Date(tsRaw);
+                                if (!isNaN(d.getTime())) {
+                                    ts.year = d.getFullYear();
+                                    ts.day = Math.floor((d.getTime() - new Date(d.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
+                                    ts.hour = d.getHours();
+                                    ts.label = '';
+                                }
+                            }
+                            const inputStyle = {
+                                width: '100%', fontSize: 'var(--text-sm)',
+                                padding: '6px 8px', background: 'var(--bg-secondary)',
+                                border: '1px solid rgba(100,116,139,0.2)', borderRadius: 'var(--radius-md)',
+                                color: 'var(--text-primary)',
+                            };
+                            const fieldLabel = { fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: 2, textTransform: 'uppercase' as const, letterSpacing: '0.5px' };
+
+                            // format preview
+                            const preview = `Y${ts.year ?? 0}, D${ts.day ?? 0}, H${ts.hour ?? 0}${ts.label ? ` — ${ts.label}` : ''}`;
+
+                            return (
+                                <div style={{
+                                    marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                    background: 'rgba(100,116,139,0.06)',
+                                    borderRadius: 'var(--radius-lg)', border: '1px solid rgba(100,116,139,0.15)',
+                                }}>
+                                    <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                        🕐 Story Timeline Position
+                                    </h4>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+                                        <div>
+                                            <div style={fieldLabel}>Year</div>
+                                            <input
+                                                type="number"
+                                                className="input"
+                                                value={(ts.year as number) ?? 0}
+                                                onChange={e => handleStoryTimeChange('year', parseInt(e.target.value) || 0)}
+                                                style={inputStyle}
+                                                placeholder="0"
+                                            />
+                                        </div>
+                                        <div>
+                                            <div style={fieldLabel}>Day</div>
+                                            <input
+                                                type="number"
+                                                className="input"
+                                                value={(ts.day as number) ?? 0}
+                                                onChange={e => handleStoryTimeChange('day', parseInt(e.target.value) || 0)}
+                                                style={inputStyle}
+                                                min={0}
+                                                max={365}
+                                                placeholder="0"
+                                            />
+                                        </div>
+                                        <div>
+                                            <div style={fieldLabel}>Hour</div>
+                                            <input
+                                                type="number"
+                                                className="input"
+                                                value={(ts.hour as number) ?? 0}
+                                                onChange={e => handleStoryTimeChange('hour', parseInt(e.target.value) || 0)}
+                                                style={inputStyle}
+                                                min={0}
+                                                max={23}
+                                                placeholder="0"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div style={fieldLabel}>Label (optional)</div>
+                                        <input
+                                            type="text"
+                                            className="input"
+                                            value={(ts.label as string) || ''}
+                                            onChange={e => handleStoryTimeChange('label', e.target.value)}
+                                            style={inputStyle}
+                                            placeholder='e.g. "The Transformation", "After the Fall"'
+                                        />
+                                    </div>
+                                    <div style={{
+                                        fontSize: 'var(--text-xs)', color: 'var(--accent-primary)',
+                                        marginTop: 8, padding: '4px 8px',
+                                        background: 'rgba(99,102,241,0.08)', borderRadius: 'var(--radius-sm)',
+                                        fontFamily: 'SF Mono, monospace',
+                                    }}>
+                                        ⏳ {preview}
+                                    </div>
                                 </div>
-                            </div>
-                        )}
+                            );
+                        })()}
 
                         {/* Draft Integration (events only — Feature 10) */}
                         {selectedEntity?.entity_type === 'event' && (
