@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as d3 from 'd3';
 import type { Entity, Relationship, TimelineVariant } from '../store/appStore';
 import { resolveEntity } from '../store/appStore';
@@ -35,6 +35,7 @@ const TYPE_COLORS: Record<string, string> = {
     theme: '#ec4899',  // pink
     location: '#10b981',  // emerald
     note: '#94a3b8',  // slate
+    chapter: '#f97316',  // orange
 };
 
 const TYPE_ICONS: Record<string, string> = {
@@ -45,6 +46,7 @@ const TYPE_ICONS: Record<string, string> = {
     theme: '💡',
     location: '📍',
     note: '📝',
+    chapter: '📖',
 };
 
 // ─── Status colors ──────────────────────────────────────────────
@@ -53,6 +55,21 @@ const STATUS_COLORS: Record<string, string> = {
     warning: '#ffb800',
     error: '#ff4444',
 };
+
+// ─── Emotion color gradient (red ← amber ← neutral → amber → green) ─
+function emotionColor(level: number): string {
+    if (level <= -5) return '#ef4444';
+    if (level <= -3) return '#f97316';
+    if (level <= -1) return '#f59e0b';
+    if (level === 0) return '#94a3b8';
+    if (level <= 2) return '#84cc16';
+    if (level <= 4) return '#22c55e';
+    return '#10b981';
+}
+function getEmotionLevel(entity: Entity): number {
+    const props = entity.properties as Record<string, unknown> | undefined;
+    return typeof props?.emotion_level === 'number' ? props.emotion_level : 0;
+}
 
 // ─── Layout & sizing constants ──────────────────────────────────
 const NODE_W = 300;
@@ -124,7 +141,9 @@ function layoutNodes(entities: Entity[], hiddenTypes: Set<string>): { nodes: Pos
                 entity,
                 x: LANE_LABEL_W + 40 + i * NODE_SPACING,
                 y: laneY + LANE_H / 2,
-                color: entity.color || lane.color,
+                color: entity.entity_type === 'event' && getEmotionLevel(entity) !== 0
+                    ? emotionColor(getEmotionLevel(entity))
+                    : (entity.color || lane.color),
                 laneIndex: laneIdx,
             });
         });
@@ -270,17 +289,28 @@ export default function TimelineCanvas({
     const [showRelationships, setShowRelationships] = useState(true);
     const [showMinimap, setShowMinimap] = useState(true);
 
-    // Resize observer
+    // Resize observer (debounced — Fix 4)
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
+        let timerId: ReturnType<typeof setTimeout>;
         const observer = new ResizeObserver((entries) => {
-            const { width, height } = entries[0].contentRect;
-            setDimensions({ width: Math.max(width, 400), height: Math.max(height, 300) });
+            clearTimeout(timerId);
+            timerId = setTimeout(() => {
+                const { width, height } = entries[0].contentRect;
+                setDimensions({ width: Math.max(width, 400), height: Math.max(height, 300) });
+            }, 100);
         });
         observer.observe(container);
-        return () => observer.disconnect();
+        return () => { clearTimeout(timerId); observer.disconnect(); };
     }, []);
+    // ─── Memoized layout computation (Fix 5) ──────────────────
+    const layoutResult = useMemo(() => {
+        if (viewMode === 'timeline' && timelines.length > 0) {
+            return layoutTimelineNodes(entities, hiddenTypes, timelines, variants, focusedTimelineId ?? null);
+        }
+        return layoutNodes(entities, hiddenTypes);
+    }, [entities, hiddenTypes, viewMode, timelines, variants, focusedTimelineId]);
 
     const renderCanvas = useCallback(() => {
         if (!svgRef.current) return;
@@ -336,18 +366,22 @@ export default function TimelineCanvas({
 
         (svg as unknown as d3.Selection<SVGSVGElement, unknown, null, undefined>).call(zoom);
 
-        // ─── Background: dot grid ───────────────────────────
-        const gridGroup = g.append('g').attr('class', 'grid');
+        // ─── Background: dot grid (Fix 1: SVG pattern — 2 DOM nodes instead of ~173k) ───
         const gridExtent = 5000;
+        defs.append('pattern')
+            .attr('id', 'dotGrid')
+            .attr('width', DOT_SPACING).attr('height', DOT_SPACING)
+            .attr('patternUnits', 'userSpaceOnUse')
+            .append('circle')
+            .attr('cx', DOT_SPACING / 2).attr('cy', DOT_SPACING / 2)
+            .attr('r', 0.8)
+            .attr('fill', 'rgba(255,255,255,0.04)');
 
-        for (let x = -gridExtent; x < gridExtent; x += DOT_SPACING) {
-            for (let y = -gridExtent; y < gridExtent; y += DOT_SPACING) {
-                gridGroup.append('circle')
-                    .attr('cx', x).attr('cy', y)
-                    .attr('r', 0.8)
-                    .attr('fill', 'rgba(255,255,255,0.04)');
-            }
-        }
+        const gridGroup = g.append('g').attr('class', 'grid');
+        gridGroup.append('rect')
+            .attr('x', -gridExtent).attr('y', -gridExtent)
+            .attr('width', gridExtent * 2).attr('height', gridExtent * 2)
+            .attr('fill', 'url(#dotGrid)');
 
         // Crosshair at origin
         gridGroup.append('line')
@@ -357,21 +391,11 @@ export default function TimelineCanvas({
             .attr('x1', 0).attr('y1', -gridExtent).attr('x2', 0).attr('y2', gridExtent)
             .attr('stroke', 'rgba(255,255,255,0.03)').attr('stroke-width', 1);
 
-        // ─── Layout ─────────────────────────────────────────────
-        let nodes: PositionedNode[];
-        let lanes: LaneDef[];
-        let timelineNodes: TimelineNode[] = [];
-
-        if (viewMode === 'timeline' && timelines.length > 0) {
-            const result = layoutTimelineNodes(entities, hiddenTypes, timelines, variants, focusedTimelineId ?? null);
-            timelineNodes = result.nodes;
-            nodes = result.nodes;
-            lanes = result.lanes;
-        } else {
-            const result = layoutNodes(entities, hiddenTypes);
-            nodes = result.nodes;
-            lanes = result.lanes;
-        }
+        // ─── Layout (from memoized result) ───────────────────────
+        const nodes: PositionedNode[] = layoutResult.nodes;
+        const lanes: LaneDef[] = layoutResult.lanes;
+        const timelineNodes: TimelineNode[] = viewMode === 'timeline'
+            ? layoutResult.nodes as TimelineNode[] : [];
         if (nodes.length === 0) return;
 
         // ─── Time axis ruler (horizontal, above lanes) ──────────
@@ -537,15 +561,20 @@ export default function TimelineCanvas({
                 const ty = target.y;
                 const mx = (sx + tx) / 2;
 
+                // Strength-based line thickness (Feature 11)
+                const strength = (rel.metadata as Record<string, unknown>)?.strength as number || 3;
+                const lineWidth = 0.5 + (strength * 0.6); // 1.1 to 3.5
+                const lineOpacity = 0.3 + (strength * 0.14); // 0.44 to 1.0
+
                 // Curved path
                 const path = linkGroup.append('path')
                     .attr('d', `M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${ty}, ${tx} ${ty}`)
                     .attr('fill', 'none')
                     .attr('stroke', `url(#link-grad-${rel.id})`)
-                    .attr('stroke-width', 2.5)
+                    .attr('stroke-width', lineWidth)
                     .attr('stroke-dasharray', '8 4')
                     .attr('marker-end', 'url(#arrowhead)')
-                    .attr('opacity', 0.7)
+                    .attr('opacity', lineOpacity)
                     .attr('class', 'canvas-link-animated')
                     .style('pointer-events', 'stroke');
 
@@ -584,9 +613,9 @@ export default function TimelineCanvas({
 
                 // Hover effects
                 path.on('mouseenter', function () {
-                    d3.select(this).attr('stroke-width', 4).attr('opacity', 0.95);
+                    d3.select(this).attr('stroke-width', lineWidth + 1.5).attr('opacity', Math.min(1, lineOpacity + 0.25));
                 }).on('mouseleave', function () {
-                    d3.select(this).attr('stroke-width', 2.5).attr('opacity', 0.7);
+                    d3.select(this).attr('stroke-width', lineWidth).attr('opacity', lineOpacity);
                 });
             });
         }
@@ -704,6 +733,90 @@ export default function TimelineCanvas({
             .attr('font-family', 'Inter, sans-serif')
             .attr('text-transform', 'capitalize')
             .text(d => d.entity.entity_type);
+
+        // --- Emotion indicator (event nodes only) ---
+        nodeGroup.each(function (d) {
+            if (d.entity.entity_type !== 'event') return;
+            const eLevel = getEmotionLevel(d.entity);
+            if (eLevel === 0) return;
+            const group = d3.select(this);
+            const eColor = emotionColor(eLevel);
+            const emoji = eLevel >= 3 ? '😄' : eLevel >= 1 ? '🙂' : eLevel <= -3 ? '😢' : '😟';
+            // Emotion bar at bottom
+            group.append('rect')
+                .attr('x', -NODE_W / 2)
+                .attr('y', NODE_H / 2 - 4)
+                .attr('width', NODE_W)
+                .attr('height', 4)
+                .attr('rx', 2)
+                .attr('fill', eColor)
+                .attr('opacity', 0.7);
+            // Emotion emoji badge (bottom center-left)
+            group.append('text')
+                .attr('x', -NODE_W / 2 + 50)
+                .attr('y', NODE_H / 2 - 12)
+                .attr('font-size', '10px')
+                .attr('fill', eColor)
+                .text(`${emoji} ${eLevel > 0 ? '+' : ''}${eLevel}`);
+        });
+
+        // --- POV Character badge (event nodes only — Feature 8) ---
+        nodeGroup.each(function (d) {
+            if (d.entity.entity_type !== 'event') return;
+            const props = d.entity.properties as Record<string, unknown>;
+            const pov = props?.pov_character as { name: string } | undefined;
+            if (!pov?.name) return;
+            const group = d3.select(this);
+            const povText = `👁️ ${pov.name}`;
+            const badgeW = Math.max(60, povText.length * 6 + 16);
+            group.append('rect')
+                .attr('x', NODE_W / 2 - badgeW - 8)
+                .attr('y', -NODE_H / 2 + 6)
+                .attr('width', badgeW)
+                .attr('height', 18)
+                .attr('rx', 9)
+                .attr('fill', 'rgba(99,102,241,0.15)')
+                .attr('stroke', 'rgba(99,102,241,0.3)')
+                .attr('stroke-width', 0.5);
+            group.append('text')
+                .attr('x', NODE_W / 2 - badgeW / 2 - 8)
+                .attr('y', -NODE_H / 2 + 18)
+                .attr('font-size', '9px')
+                .attr('font-family', 'Inter, sans-serif')
+                .attr('fill', '#818cf8')
+                .attr('text-anchor', 'middle')
+                .text(povText);
+        });
+
+        // --- Word count badge (event/chapter nodes — Feature 10/5) ---
+        nodeGroup.each(function (d) {
+            if (d.entity.entity_type !== 'event' && d.entity.entity_type !== 'chapter') return;
+            const props = d.entity.properties as Record<string, unknown>;
+            const dt = props?.draft_text as string | undefined;
+            if (!dt) return;
+            const wc = dt.split(/\s+/).filter(Boolean).length;
+            if (wc === 0) return;
+            const group = d3.select(this);
+            const wcText = `📝 ${wc.toLocaleString()}w`;
+            const badgeW = Math.max(50, wcText.length * 6 + 12);
+            group.append('rect')
+                .attr('x', -NODE_W / 2 + 8)
+                .attr('y', -NODE_H / 2 + 6)
+                .attr('width', badgeW)
+                .attr('height', 18)
+                .attr('rx', 9)
+                .attr('fill', 'rgba(34,197,94,0.12)')
+                .attr('stroke', 'rgba(34,197,94,0.25)')
+                .attr('stroke-width', 0.5);
+            group.append('text')
+                .attr('x', -NODE_W / 2 + 8 + badgeW / 2)
+                .attr('y', -NODE_H / 2 + 18)
+                .attr('font-size', '9px')
+                .attr('font-family', 'SF Mono, monospace')
+                .attr('fill', '#22c55e')
+                .attr('text-anchor', 'middle')
+                .text(wcText);
+        });
 
         // --- Connection count badge (bottom-right, full text) ---
         if (relationships.length > 0) {
@@ -842,6 +955,76 @@ export default function TimelineCanvas({
             });
         }
 
+        // --- Temporal gap labels between timestamped events (Feature 12) ---
+        {
+            const timedEvents = nodes
+                .filter(n => n.entity.entity_type === 'event' && (n.entity.properties as Record<string, unknown>)?.timestamp)
+                .map(n => ({
+                    node: n,
+                    date: new Date((n.entity.properties as Record<string, unknown>).timestamp as string),
+                }))
+                .filter(e => !isNaN(e.date.getTime()))
+                .sort((a, b) => a.date.getTime() - b.date.getTime());
+
+            const gapGroup = g.append('g').attr('class', 'temporal-gaps');
+
+            for (let i = 0; i < timedEvents.length - 1; i++) {
+                const from = timedEvents[i];
+                const to = timedEvents[i + 1];
+                const diffMs = to.date.getTime() - from.date.getTime();
+                const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+                if (diffDays === 0) continue;
+
+                let label: string;
+                if (diffDays >= 365) {
+                    const years = Math.round(diffDays / 365);
+                    label = `${years} year${years > 1 ? 's' : ''} later`;
+                } else if (diffDays >= 30) {
+                    const months = Math.round(diffDays / 30);
+                    label = `${months} month${months > 1 ? 's' : ''} later`;
+                } else {
+                    label = `${diffDays} day${diffDays > 1 ? 's' : ''} later`;
+                }
+
+                // Position between the two nodes
+                const midX = (from.node.x + to.node.x) / 2;
+                const midY = (from.node.y + to.node.y) / 2 - NODE_H / 2 - 22;
+                const tw = Math.max(70, label.length * 6 + 20);
+
+                // Dotted connector line
+                gapGroup.append('line')
+                    .attr('x1', from.node.x + NODE_W / 2 + 4)
+                    .attr('y1', from.node.y - NODE_H / 2 - 10)
+                    .attr('x2', to.node.x - NODE_W / 2 - 4)
+                    .attr('y2', to.node.y - NODE_H / 2 - 10)
+                    .attr('stroke', 'rgba(148,163,184,0.2)')
+                    .attr('stroke-width', 1)
+                    .attr('stroke-dasharray', '4 3');
+
+                // Label pill background
+                gapGroup.append('rect')
+                    .attr('x', midX - tw / 2)
+                    .attr('y', midY - 8)
+                    .attr('width', tw)
+                    .attr('height', 16)
+                    .attr('rx', 8)
+                    .attr('fill', 'rgba(15,23,42,0.85)')
+                    .attr('stroke', 'rgba(148,163,184,0.15)')
+                    .attr('stroke-width', 0.5);
+
+                // Label text
+                gapGroup.append('text')
+                    .attr('x', midX)
+                    .attr('y', midY + 4)
+                    .attr('text-anchor', 'middle')
+                    .attr('font-size', '9px')
+                    .attr('font-family', 'Inter, sans-serif')
+                    .attr('fill', 'rgba(148,163,184,0.65)')
+                    .attr('font-style', 'italic')
+                    .text(`⏳ ${label}`);
+            }
+        }
+
         // --- Click handler ---
         nodeGroup.on('click', (_event, d) => {
             if (!dragMoved) {
@@ -901,15 +1084,15 @@ export default function TimelineCanvas({
             );
         }
 
-    }, [entities, relationships, dimensions, selectedEntityId, onEntitySelect, onEntityPositionUpdate, hiddenTypes, showRelationships, consistencyStatus, entityVariantCounts, viewMode, focusedTimelineId, variants, timelines]);
+    }, [layoutResult, relationships, dimensions, selectedEntityId, onEntitySelect, onEntityPositionUpdate, hiddenTypes, showRelationships, consistencyStatus, entityVariantCounts, viewMode, focusedTimelineId]);
 
     useEffect(() => {
         renderCanvas();
     }, [renderCanvas]);
 
     // ─── Gather stats ───────────────────────────────────────
-    const uniqueTypes = [...new Set(entities.map(e => e.entity_type))];
-    const timelineCount = entities.filter(e => e.entity_type === 'timeline').length;
+    const uniqueTypes = useMemo(() => [...new Set(entities.map(e => e.entity_type))], [entities]);
+    const timelineCount = useMemo(() => entities.filter(e => e.entity_type === 'timeline').length, [entities]);
 
     return (
         <div
@@ -1128,20 +1311,23 @@ export default function TimelineCanvas({
                     }}>
                         <svg width="168" height="98" viewBox={vb}>
                             {/* Relationship lines */}
-                            {relationships.map(rel => {
-                                const from = visibleEnts.find(e => e.id === rel.from_entity_id);
-                                const to = visibleEnts.find(e => e.id === rel.to_entity_id);
-                                if (!from || !to) return null;
-                                return (
-                                    <line
-                                        key={rel.id}
-                                        x1={from.position_x} y1={from.position_y}
-                                        x2={to.position_x} y2={to.position_y}
-                                        stroke="rgba(99,102,241,0.3)"
-                                        strokeWidth={2}
-                                    />
-                                );
-                            })}
+                            {(() => {
+                                const entityMap = new Map(visibleEnts.map(e => [e.id, e]));
+                                return relationships.map(rel => {
+                                    const from = entityMap.get(rel.from_entity_id);
+                                    const to = entityMap.get(rel.to_entity_id);
+                                    if (!from || !to) return null;
+                                    return (
+                                        <line
+                                            key={rel.id}
+                                            x1={from.position_x} y1={from.position_y}
+                                            x2={to.position_x} y2={to.position_y}
+                                            stroke="rgba(99,102,241,0.3)"
+                                            strokeWidth={2}
+                                        />
+                                    );
+                                });
+                            })()}
                             {/* Entity dots */}
                             {visibleEnts.map(e => (
                                 <rect
@@ -1177,6 +1363,68 @@ export default function TimelineCanvas({
                         }}>
                             OVERVIEW
                         </div>
+                    </div>
+                );
+            })()}
+
+            {/* ─── Emotional Arc Line Graph ──────────────────── */}
+            {(() => {
+                const events = entities.filter(e => e.entity_type === 'event');
+                const emotionData = events.map(e => ({ name: e.name, level: getEmotionLevel(e), id: e.id })).filter(d => d.level !== 0);
+                if (emotionData.length < 2) return null;
+                const graphW = 900;
+                const graphH = 100;
+                const padX = 40;
+                const padY = 16;
+                const innerW = graphW - padX * 2;
+                const innerH = graphH - padY * 2;
+                return (
+                    <div style={{
+                        position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+                        maxWidth: graphW, width: 'calc(100% - 16px)',
+                        background: 'rgba(15,23,42,0.85)',
+                        border: '1px solid rgba(100,116,139,0.2)',
+                        borderRadius: 8, padding: '8px 0',
+                        backdropFilter: 'blur(8px)', zIndex: 10,
+                    }}>
+                        <div style={{ fontSize: 9, color: '#64748b', fontFamily: 'SF Mono, monospace', textTransform: 'uppercase', letterSpacing: 1, paddingLeft: 12, marginBottom: 4 }}>
+                            EMOTIONAL ARC
+                        </div>
+                        <svg width="100%" viewBox={`0 0 ${graphW} ${graphH}`} preserveAspectRatio="xMidYMid meet">
+                            <line x1={padX} y1={padY + innerH / 2} x2={graphW - padX} y2={padY + innerH / 2} stroke="rgba(148,163,184,0.2)" strokeWidth={1} strokeDasharray="4 4" />
+                            <text x={padX - 4} y={padY + 4} fontSize={8} fill="#64748b" textAnchor="end">+5</text>
+                            <text x={padX - 4} y={padY + innerH / 2 + 3} fontSize={8} fill="#64748b" textAnchor="end">0</text>
+                            <text x={padX - 4} y={padY + innerH} fontSize={8} fill="#64748b" textAnchor="end">-5</text>
+                            <polyline
+                                fill="none"
+                                stroke="url(#emotionGrad)"
+                                strokeWidth={2}
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                points={emotionData.map((d, i) => {
+                                    const x = padX + (i / (emotionData.length - 1)) * innerW;
+                                    const y = padY + ((5 - d.level) / 10) * innerH;
+                                    return `${x},${y}`;
+                                }).join(' ')}
+                            />
+                            <defs>
+                                <linearGradient id="emotionGrad" x1="0" y1="0" x2="1" y2="0">
+                                    {emotionData.map((d, i) => (
+                                        <stop key={i} offset={`${(i / (emotionData.length - 1)) * 100}%`} stopColor={emotionColor(d.level)} />
+                                    ))}
+                                </linearGradient>
+                            </defs>
+                            {emotionData.map((d, i) => {
+                                const x = padX + (i / (emotionData.length - 1)) * innerW;
+                                const y = padY + ((5 - d.level) / 10) * innerH;
+                                return (
+                                    <g key={d.id}>
+                                        <circle cx={x} cy={y} r={4} fill={emotionColor(d.level)} stroke="#0f172a" strokeWidth={1.5} />
+                                        <text x={x} y={graphH - 2} fontSize={7} fill="#94a3b8" textAnchor="middle">{d.name.slice(0, 12)}</text>
+                                    </g>
+                                );
+                            })}
+                        </svg>
                     </div>
                 );
             })()}

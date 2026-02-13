@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { PresenceUser } from '../services/presenceService';
 
 export interface Project {
     id: string;
@@ -12,7 +13,7 @@ export interface Project {
 export interface Entity {
     id: string;
     project_id: string;
-    entity_type: 'character' | 'timeline' | 'event' | 'arc' | 'theme' | 'location' | 'note';
+    entity_type: 'character' | 'timeline' | 'event' | 'arc' | 'theme' | 'location' | 'note' | 'chapter';
     name: string;
     description: string;
     properties: Record<string, unknown>;
@@ -88,6 +89,10 @@ interface AppState {
     // Sidebar
     sidebarCollapsed: boolean;
     toggleSidebar: () => void;
+
+    // Presence (E5-US2)
+    activeUsers: PresenceUser[];
+    setActiveUsers: (users: PresenceUser[]) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -112,4 +117,7 @@ export const useAppStore = create<AppState>((set) => ({
 
     sidebarCollapsed: false,
     toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+
+    activeUsers: [],
+    setActiveUsers: (users) => set({ activeUsers: users }),
 }));

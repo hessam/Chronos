@@ -32,7 +32,7 @@ export const updateProjectSchema = z.object({
 // Entity Schemas
 // ============================================================
 export const entityTypes = [
-    'character', 'timeline', 'event', 'arc', 'theme', 'location', 'note',
+    'character', 'timeline', 'event', 'arc', 'theme', 'location', 'note', 'chapter',
 ] as const;
 
 export type EntityType = (typeof entityTypes)[number];

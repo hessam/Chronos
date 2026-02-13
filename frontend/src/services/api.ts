@@ -218,11 +218,11 @@ export const api = {
 
     async createRelationship(
         projectId: string,
-        body: { from_entity_id: string; to_entity_id: string; relationship_type: string; label?: string }
+        body: { from_entity_id: string; to_entity_id: string; relationship_type: string; label?: string; metadata?: Record<string, unknown> }
     ): Promise<{ relationship: unknown }> {
         const { data, error } = await supabase
             .from('relationships')
-            .insert({ ...body, project_id: projectId })
+            .insert({ ...body, project_id: projectId, metadata: body.metadata || {} })
             .select()
             .single();
         if (error) throw new Error(error.message);
@@ -315,5 +315,47 @@ export const api = {
 
         if (entityError) throw new Error(entityError.message);
         return { entities: (entityData || []) as Entity[], paths };
+    },
+
+    // ─── Full-Text Search (E6-US2) ────────────────────────────
+    async searchEntities(
+        projectId: string,
+        query: string,
+        opts?: { limit?: number }
+    ): Promise<{ results: Entity[]; grouped: Record<string, Entity[]> }> {
+        const limit = opts?.limit || 20;
+        const trimmed = query.trim();
+        if (!trimmed) return { results: [], grouped: {} };
+
+        const { data, error } = await supabase
+            .from('entities')
+            .select('*')
+            .eq('project_id', projectId)
+            .or(`name.ilike.%${trimmed}%,description.ilike.%${trimmed}%`)
+            .order('updated_at', { ascending: false })
+            .limit(limit);
+
+        if (error) throw new Error(error.message);
+        const results = (data || []) as Entity[];
+
+        // Group results by entity_type
+        const grouped: Record<string, Entity[]> = {};
+        for (const entity of results) {
+            if (!grouped[entity.entity_type]) grouped[entity.entity_type] = [];
+            grouped[entity.entity_type].push(entity);
+        }
+
+        return { results, grouped };
+    },
+
+    // ─── Single Entity Fetch ──────────────────────────────────
+    async getEntity(id: string): Promise<{ entity: Entity }> {
+        const { data, error } = await supabase
+            .from('entities')
+            .select('*')
+            .eq('id', id)
+            .single();
+        if (error) throw new Error(error.message);
+        return { entity: data as Entity };
     },
 };

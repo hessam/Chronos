@@ -1,12 +1,29 @@
-import { useEffect } from 'react';
+import { useEffect, Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './store/authStore';
 import LoginPage from './pages/LoginPage';
-import SignUpPage from './pages/SignUpPage';
 import ProjectsPage from './pages/ProjectsPage';
 import WorkspacePage from './pages/WorkspacePage';
-import SettingsPage from './pages/SettingsPage';
+import OfflineIndicator from './components/OfflineIndicator';
+import { initOfflineListeners } from './services/offlineService';
 import React from 'react';
+
+// Route-based code splitting (E6-US3)
+const SignUpPage = lazy(() => import('./pages/SignUpPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
+
+// Loading fallback
+function PageLoader() {
+    return (
+        <div className="loading-center">
+            <div className="spinner" />
+            <p style={{ marginTop: 16, color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
+                Loading...
+            </p>
+        </div>
+    );
+}
 
 // ─── Error Boundary ─────────────────────────────────────
 // Catches render errors so the app shows a recoverable error instead of a blank page.
@@ -68,14 +85,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const { isAuthenticated, isLoading } = useAuthStore();
 
     if (isLoading) {
-        return (
-            <div className="loading-center">
-                <div className="spinner" />
-                <p style={{ marginTop: 16, color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
-                    Connecting...
-                </p>
-            </div>
-        );
+        return <PageLoader />;
     }
 
     if (!isAuthenticated) {
@@ -89,14 +99,7 @@ function AuthRoute({ children }: { children: React.ReactNode }) {
     const { isAuthenticated, isLoading } = useAuthStore();
 
     if (isLoading) {
-        return (
-            <div className="loading-center">
-                <div className="spinner" />
-                <p style={{ marginTop: 16, color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
-                    Connecting...
-                </p>
-            </div>
-        );
+        return <PageLoader />;
     }
 
     if (isAuthenticated) {
@@ -114,18 +117,29 @@ export default function App() {
         initialize();
     }, [initialize]);
 
+    // Initialize offline listeners (E6-US1)
+    useEffect(() => {
+        const cleanup = initOfflineListeners();
+        return cleanup;
+    }, []);
+
     return (
         <ErrorBoundary>
             <BrowserRouter>
-                <Routes>
-                    <Route path="/login" element={<AuthRoute><LoginPage /></AuthRoute>} />
-                    <Route path="/signup" element={<AuthRoute><SignUpPage /></AuthRoute>} />
-                    <Route path="/projects" element={<ProtectedRoute><ProjectsPage /></ProtectedRoute>} />
-                    <Route path="/project/:projectId" element={<ProtectedRoute><WorkspacePage /></ProtectedRoute>} />
-                    <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
-                    <Route path="*" element={<Navigate to="/projects" replace />} />
-                </Routes>
+                <Suspense fallback={<PageLoader />}>
+                    <Routes>
+                        <Route path="/login" element={<AuthRoute><LoginPage /></AuthRoute>} />
+                        <Route path="/signup" element={<AuthRoute><SignUpPage /></AuthRoute>} />
+                        <Route path="/projects" element={<ProtectedRoute><ProjectsPage /></ProtectedRoute>} />
+                        <Route path="/project/:projectId" element={<ProtectedRoute><WorkspacePage /></ProtectedRoute>} />
+                        <Route path="/project/:projectId/analytics" element={<ProtectedRoute><AnalyticsPage /></ProtectedRoute>} />
+                        <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
+                        <Route path="*" element={<Navigate to="/projects" replace />} />
+                    </Routes>
+                </Suspense>
+                <OfflineIndicator />
             </BrowserRouter>
         </ErrorBoundary>
     );
 }
+

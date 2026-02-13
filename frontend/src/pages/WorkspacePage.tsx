@@ -1,4 +1,4 @@
-import { useEffect, useState, FormEvent, useCallback } from 'react';
+import { useEffect, useState, useRef, FormEvent, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -6,8 +6,10 @@ import { useAppStore, resolveEntity } from '../store/appStore';
 import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import TimelineCanvas from '../components/TimelineCanvas';
-import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
-import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport } from '../services/aiService';
+import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
+import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
+import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
+import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
 
 const ENTITY_ICONS: Record<string, string> = {
     character: '👤',
@@ -17,6 +19,7 @@ const ENTITY_ICONS: Record<string, string> = {
     theme: '🎭',
     location: '📍',
     note: '📝',
+    chapter: '📖',
     all: '📋',
 };
 
@@ -28,6 +31,7 @@ const ENTITY_LABELS: Record<string, string> = {
     theme: 'Themes',
     location: 'Locations',
     note: 'Notes',
+    chapter: 'Chapters',
 };
 
 // Colors for variant timeline dots
@@ -41,15 +45,20 @@ export default function WorkspacePage() {
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const signOut = useAuthStore((s) => s.signOut);
+    const user = useAuthStore((s) => s.user);
     const {
         currentProject, setCurrentProject,
         selectedEntity, setSelectedEntity,
         entityFilter, setEntityFilter,
         contextPanelOpen,
         focusedTimelineId, setFocusedTimelineId,
+        activeUsers, setActiveUsers,
     } = useAppStore();
 
     const [searchQuery, setSearchQuery] = useState('');
+    const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+    const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+    const globalSearchRef = useRef<HTMLInputElement>(null);
     const [showCreateEntity, setShowCreateEntity] = useState(false);
     const [newEntityName, setNewEntityName] = useState('');
     const [newEntityDesc, setNewEntityDesc] = useState('');
@@ -89,6 +98,62 @@ export default function WorkspacePage() {
     const [pendingSaveField, setPendingSaveField] = useState<string | null>(null);
     const [rippleError, setRippleError] = useState<string | null>(null);
 
+    // Scene Card Generator state
+    const [sceneCard, setSceneCard] = useState<SceneCard | null>(null);
+    const [sceneLoading, setSceneLoading] = useState(false);
+    const [sceneError, setSceneError] = useState<string | null>(null);
+    const [editingSceneField, setEditingSceneField] = useState<keyof SceneCard | null>(null);
+    const [sceneFieldDraft, setSceneFieldDraft] = useState('');
+
+    // Narrative Sequence Builder state
+    const [showSequenceModal, setShowSequenceModal] = useState(false);
+    const [sequenceSteps, setSequenceSteps] = useState<NarrativeStep[]>([]);
+    const [sequenceLoading, setSequenceLoading] = useState(false);
+    const [sequenceError, setSequenceError] = useState<string | null>(null);
+
+    // Missing Scene Detector state
+    const [showGapsModal, setShowGapsModal] = useState(false);
+    const [gapScenes, setGapScenes] = useState<MissingScene[]>([]);
+    const [gapLoading, setGapLoading] = useState(false);
+    const [gapError, setGapError] = useState<string | null>(null);
+
+    // Character Voice Samples state
+    const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>([]);
+    const [voiceLoading, setVoiceLoading] = useState(false);
+    const [voiceError, setVoiceError] = useState<string | null>(null);
+
+    // Emotional Beat Tracker state
+    const [emotionLevel, setEmotionLevel] = useState<number>(0);
+
+    // Voice sample editing state
+    const [editingVoiceIdx, setEditingVoiceIdx] = useState<number | null>(null);
+    const [voiceLineDraft, setVoiceLineDraft] = useState('');
+    const [voiceCtxDraft, setVoiceCtxDraft] = useState('');
+
+    // Chapter Assembler state
+    const [chapterBlueprint, setChapterBlueprint] = useState<ChapterBlueprint | null>(null);
+    const [chapterLoading, setChapterLoading] = useState(false);
+    const [chapterError, setChapterError] = useState<string | null>(null);
+
+    // POV Analysis state
+    const [povIssues, setPovIssues] = useState<POVIssue[]>([]);
+    const [povDistribution, setPovDistribution] = useState<Record<string, number>>({});
+    const [povLoading, setPovLoading] = useState(false);
+
+    // Draft text state
+    const [draftText, setDraftText] = useState('');
+    const [showDraftSection, setShowDraftSection] = useState(false);
+
+    // Relationship strength state
+    const [relStrength, setRelStrength] = useState(3);
+
+    // Temporal gaps
+    const [temporalGaps, setTemporalGaps] = useState<TemporalGap[]>([]);
+
+    // Sidebar tools dropdown
+    const [showToolsMenu, setShowToolsMenu] = useState(false);
+    const toolsMenuRef = useRef<HTMLDivElement>(null);
+
     // Relationship state (Sprint 4)
     const [showCreateRelModal, setShowCreateRelModal] = useState(false);
     const [relFromId, setRelFromId] = useState<string | null>(null);
@@ -107,6 +172,71 @@ export default function WorkspacePage() {
         if (projectData?.project) setCurrentProject(projectData.project);
         return () => setCurrentProject(null);
     }, [projectData, setCurrentProject]);
+
+    // ─── Realtime Subscription (E5-US1) ──────────────────────
+    useEffect(() => {
+        if (!projectId) return;
+        subscribeToProject(projectId, queryClient);
+        return () => unsubscribeFromProject();
+    }, [projectId, queryClient]);
+
+    // ─── Realtime Toast Notifications (E5-US1) ──────────────
+    useEffect(() => {
+        const unsub = onRealtimeEvent((event) => {
+            if (event.table === 'entities' && event.eventType === 'UPDATE') {
+                const name = (event.new as Record<string, unknown>).name || 'Entity';
+                console.log(`🔄 ${name} was updated by another user`);
+            }
+        });
+        return unsub;
+    }, []);
+
+    // ─── Presence Tracking (E5-US2) ──────────────────────────
+    useEffect(() => {
+        if (!projectId || !user) return;
+        trackPresence(
+            projectId,
+            user.id,
+            user.user_metadata?.full_name || user.email || 'User',
+            user.email || '',
+            setActiveUsers
+        );
+        return () => stopPresence();
+    }, [projectId, user, setActiveUsers]);
+
+    // Broadcast editing entity for presence
+    useEffect(() => {
+        broadcastEditingEntity(selectedEntity?.id || null);
+    }, [selectedEntity]);
+
+    // ─── Global Search (Cmd+K) ──────────────────────────────
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                e.preventDefault();
+                setGlobalSearchOpen(prev => !prev);
+                setGlobalSearchQuery('');
+            }
+            if (e.key === 'Escape') {
+                setGlobalSearchOpen(false);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
+    useEffect(() => {
+        if (globalSearchOpen && globalSearchRef.current) {
+            globalSearchRef.current.focus();
+        }
+    }, [globalSearchOpen]);
+
+    // Global search query
+    const { data: globalSearchData } = useQuery({
+        queryKey: ['search', projectId, globalSearchQuery],
+        queryFn: () => api.searchEntities(projectId!, globalSearchQuery),
+        enabled: !!projectId && globalSearchQuery.length >= 2,
+    });
 
     // Fetch entities (unfiltered for canvas — we filter in the sidebar)
     const { data: allEntitiesData } = useQuery({
@@ -201,7 +331,7 @@ export default function WorkspacePage() {
 
     // Create relationship (Sprint 4)
     const createRelationship = useMutation({
-        mutationFn: (body: { from_entity_id: string; to_entity_id: string; relationship_type: string; label?: string }) =>
+        mutationFn: (body: { from_entity_id: string; to_entity_id: string; relationship_type: string; label?: string; metadata?: Record<string, unknown> }) =>
             api.createRelationship(projectId!, body),
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['relationships', projectId] });
@@ -365,6 +495,381 @@ export default function WorkspacePage() {
         });
     };
 
+    // Scene Card Generator handler
+    const handleGenerateScene = async () => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        setSceneLoading(true);
+        setSceneError(null);
+        setSceneCard(null);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+            const connectedIds = allRels
+                .filter(r => r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id)
+                .map(r => r.from_entity_id === selectedEntity.id ? r.to_entity_id : r.from_entity_id);
+            const connected = allEntities.filter(e => connectedIds.includes(e.id));
+            const result = await generateSceneCard({
+                eventName: selectedEntity.name,
+                eventDescription: selectedEntity.description,
+                connectedCharacters: connected.filter(e => e.entity_type === 'character').map(e => ({ name: e.name, description: e.description })),
+                connectedLocations: connected.filter(e => e.entity_type === 'location').map(e => ({ name: e.name, description: e.description })),
+                connectedThemes: connected.filter(e => e.entity_type === 'theme').map(e => ({ name: e.name, description: e.description })),
+                projectContext: currentProject?.description,
+            });
+            setSceneCard(result.sceneCard);
+            // Auto-save to entity properties
+            updateEntity.mutate({
+                id: selectedEntity.id,
+                body: { properties: { ...selectedEntity.properties, scene_card: result.sceneCard } },
+            });
+        } catch (err) {
+            setSceneError(err instanceof Error ? err.message : 'Failed to generate scene card');
+        } finally {
+            setSceneLoading(false);
+        }
+    };
+
+    // Save manually edited scene card field
+    const saveSceneField = (field: keyof SceneCard, value: string) => {
+        if (!sceneCard || !selectedEntity) return;
+        const updated = { ...sceneCard, [field]: value };
+        setSceneCard(updated);
+        setEditingSceneField(null);
+        updateEntity.mutate({
+            id: selectedEntity.id,
+            body: { properties: { ...selectedEntity.properties, scene_card: updated } },
+        });
+    };
+
+    // Load saved data when selecting an entity
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        const props = selectedEntity?.properties as Record<string, unknown> | undefined;
+        // Scene card (events only)
+        if (selectedEntity?.entity_type === 'event' && props) {
+            setSceneCard((props.scene_card as SceneCard) || null);
+            setEmotionLevel(typeof props.emotion_level === 'number' ? props.emotion_level : 0);
+        } else {
+            setSceneCard(null);
+            setEmotionLevel(0);
+        }
+        // Voice samples (characters only)
+        if (selectedEntity?.entity_type === 'character' && props) {
+            setVoiceSamples((props.voice_samples as VoiceSample[]) || []);
+        } else {
+            setVoiceSamples([]);
+        }
+        setSceneError(null);
+        setVoiceError(null);
+        setEditingSceneField(null);
+        setEditingVoiceIdx(null);
+    }, [selectedEntity?.id]);
+
+    // Close tools menu on click outside
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
+            if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+                setShowToolsMenu(false);
+            }
+        };
+        if (showToolsMenu) document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [showToolsMenu]);
+
+    // Narrative Sequence Builder handler
+    const handleBuildSequence = async () => {
+        setSequenceLoading(true);
+        setSequenceError(null);
+        setSequenceSteps([]);
+        setShowSequenceModal(true);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+            const events = allEntities.filter(e => e.entity_type === 'event');
+            const entityMap = new Map(allEntities.map(e => [e.id, e]));
+            const rels = allRels.map(r => ({
+                fromName: entityMap.get(r.from_entity_id)?.name || '',
+                toName: entityMap.get(r.to_entity_id)?.name || '',
+                type: r.relationship_type,
+            })).filter(r => r.fromName && r.toName);
+            const result = await buildNarrativeSequence({
+                events: events.map(e => ({ id: e.id, name: e.name, description: e.description })),
+                relationships: rels,
+                projectName: currentProject?.name || '',
+            });
+            setSequenceSteps(result.steps);
+        } catch (err) {
+            setSequenceError(err instanceof Error ? err.message : 'Failed to build sequence');
+        } finally {
+            setSequenceLoading(false);
+        }
+    };
+
+    // Missing Scene Detector handler
+    const handleFindGaps = async () => {
+        setGapLoading(true);
+        setGapError(null);
+        setGapScenes([]);
+        setShowGapsModal(true);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+            const entityMap = new Map(allEntities.map(e => [e.id, e]));
+            const result = await detectMissingScenes({
+                events: allEntities.filter(e => e.entity_type === 'event').map(e => ({ name: e.name, description: e.description })),
+                characters: allEntities.filter(e => e.entity_type === 'character').map(e => ({ name: e.name, description: e.description })),
+                locations: allEntities.filter(e => e.entity_type === 'location').map(e => ({ name: e.name, description: e.description })),
+                relationships: allRels.map(r => ({
+                    fromName: entityMap.get(r.from_entity_id)?.name || '',
+                    toName: entityMap.get(r.to_entity_id)?.name || '',
+                    type: r.relationship_type,
+                })).filter(r => r.fromName && r.toName),
+                projectName: currentProject?.name || '',
+            });
+            setGapScenes(result.scenes);
+        } catch (err) {
+            setGapError(err instanceof Error ? err.message : 'Failed to detect gaps');
+        } finally {
+            setGapLoading(false);
+        }
+    };
+
+    // Create event from gap suggestion
+    const createEventFromGap = (gap: MissingScene) => {
+        createEntity.mutate({
+            entity_type: 'event',
+            name: gap.title,
+            description: gap.description,
+            properties: { source: 'ai_gap_detection', afterEvent: gap.afterEvent, beforeEvent: gap.beforeEvent },
+        });
+        setGapScenes(prev => prev.filter(g => g.id !== gap.id));
+    };
+
+    // Character Voice Samples handler
+    const handleGenerateVoice = async () => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'character') return;
+        setVoiceLoading(true);
+        setVoiceError(null);
+        setVoiceSamples([]);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+            const connectedIds = allRels
+                .filter(r => r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id)
+                .map(r => r.from_entity_id === selectedEntity.id ? r.to_entity_id : r.from_entity_id);
+            const connected = allEntities.filter(e => connectedIds.includes(e.id));
+            const result = await generateCharacterVoice({
+                characterName: selectedEntity.name,
+                characterDescription: selectedEntity.description,
+                connectedThemes: connected.filter(e => e.entity_type === 'theme').map(e => ({ name: e.name, description: e.description })),
+                connectedArcs: connected.filter(e => e.entity_type === 'arc').map(e => ({ name: e.name, description: e.description })),
+                projectContext: currentProject?.description,
+            });
+            setVoiceSamples(result.samples);
+            // Auto-save to entity properties
+            updateEntity.mutate({
+                id: selectedEntity.id,
+                body: { properties: { ...selectedEntity.properties, voice_samples: result.samples } },
+            });
+        } catch (err) {
+            setVoiceError(err instanceof Error ? err.message : 'Failed to generate voice samples');
+        } finally {
+            setVoiceLoading(false);
+        }
+    };
+
+    // Worldbuilding Wiki Export handler
+    const handleExportWiki = () => {
+        const allEntities = allEntitiesData?.entities || [];
+        const allRels = (relationshipsData?.relationships || []) as Relationship[];
+        const entityMap = new Map(allEntities.map(e => [e.id, e]));
+        const rels = allRels.map(r => ({
+            fromName: entityMap.get(r.from_entity_id)?.name || '',
+            toName: entityMap.get(r.to_entity_id)?.name || '',
+            type: r.relationship_type,
+            label: r.label,
+        })).filter(r => r.fromName && r.toName);
+
+        const md = generateWikiMarkdown({
+            projectName: currentProject?.name || 'Untitled Project',
+            entities: allEntities.map(e => ({ name: e.name, entity_type: e.entity_type, description: e.description, properties: e.properties as Record<string, unknown> })),
+            relationships: rels,
+        });
+
+        // Download as .md file
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${(currentProject?.name || 'chronos').replace(/\s+/g, '-').toLowerCase()}-wiki.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // Copy wiki to clipboard
+    const handleCopyWiki = async () => {
+        const allEntities = allEntitiesData?.entities || [];
+        const allRels = (relationshipsData?.relationships || []) as Relationship[];
+        const entityMap = new Map(allEntities.map(e => [e.id, e]));
+        const rels = allRels.map(r => ({
+            fromName: entityMap.get(r.from_entity_id)?.name || '',
+            toName: entityMap.get(r.to_entity_id)?.name || '',
+            type: r.relationship_type,
+            label: r.label,
+        })).filter(r => r.fromName && r.toName);
+
+        const md = generateWikiMarkdown({
+            projectName: currentProject?.name || 'Untitled Project',
+            entities: allEntities.map(e => ({ name: e.name, entity_type: e.entity_type, description: e.description, properties: e.properties as Record<string, unknown> })),
+            relationships: rels,
+        });
+
+        await navigator.clipboard.writeText(md);
+    };
+
+    // Emotional Beat Tracker — update emotion level on event
+    const handleEmotionChange = (value: number) => {
+        setEmotionLevel(value);
+        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        updateEntity.mutate({
+            id: selectedEntity.id,
+            body: { properties: { ...selectedEntity.properties, emotion_level: value } },
+        });
+    };
+
+    // POV Character assignment (Feature 8)
+    const handlePOVChange = (characterId: string) => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        const allEntities = allEntitiesData?.entities || [];
+        const char = allEntities.find(e => e.id === characterId);
+        const povData = characterId ? { id: characterId, name: char?.name || '' } : null;
+        updateEntity.mutate({
+            id: selectedEntity.id,
+            body: { properties: { ...selectedEntity.properties, pov_character: povData } },
+        });
+    };
+
+    // POV Balance Analysis (Feature 8)
+    const handleAnalyzePOV = async () => {
+        setPovLoading(true);
+        setPovIssues([]);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const events = allEntities.filter(e => e.entity_type === 'event').map(e => ({
+                name: e.name,
+                povCharacter: (e.properties as Record<string, unknown>)?.pov_character ? ((e.properties as Record<string, unknown>).pov_character as { name: string })?.name : undefined,
+                emotionLevel: (e.properties as Record<string, unknown>)?.emotion_level as number | undefined,
+            }));
+            const characters = allEntities.filter(e => e.entity_type === 'character').map(e => ({ name: e.name, description: e.description }));
+            const result = await analyzePOVBalance({ events, characters, projectContext: currentProject?.description });
+            setPovIssues(result.issues);
+            setPovDistribution(result.distribution);
+        } catch { /* silent */ } finally { setPovLoading(false); }
+    };
+
+    // Draft text save (Feature 10)
+    const handleSaveDraft = (text: string) => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        setDraftText(text);
+        updateEntity.mutate({
+            id: selectedEntity.id,
+            body: { properties: { ...selectedEntity.properties, draft_text: text } },
+        });
+    };
+
+    // Chapter Assembly (Feature 5)
+    const handleAssembleChapter = async () => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'chapter') return;
+        setChapterLoading(true);
+        setChapterError(null);
+        setChapterBlueprint(null);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+            // Find events connected to this chapter
+            const connectedIds = allRels
+                .filter(r => r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id)
+                .map(r => r.from_entity_id === selectedEntity.id ? r.to_entity_id : r.from_entity_id);
+            const connectedEvents = allEntities
+                .filter(e => connectedIds.includes(e.id) && e.entity_type === 'event')
+                .map(e => {
+                    const props = e.properties as Record<string, unknown>;
+                    const sc = props?.scene_card as { pov?: string; goal?: string; conflict?: string; outcome?: string; openingLine?: string } | undefined;
+                    const dt = props?.draft_text as string | undefined;
+                    return {
+                        name: e.name,
+                        description: e.description,
+                        sceneCard: sc || undefined,
+                        emotionLevel: props?.emotion_level as number | undefined,
+                        povCharacter: (props?.pov_character as { name: string })?.name,
+                        draftWordCount: dt ? dt.split(/\s+/).filter(Boolean).length : undefined,
+                    };
+                });
+            const connectedCharIds = new Set<string>();
+            for (const ev of connectedEvents.map(e => allEntities.find(a => a.name === e.name)!).filter(Boolean)) {
+                allRels.filter(r => r.from_entity_id === ev.id || r.to_entity_id === ev.id)
+                    .forEach(r => { connectedCharIds.add(r.from_entity_id); connectedCharIds.add(r.to_entity_id); });
+            }
+            const characters = allEntities
+                .filter(e => connectedCharIds.has(e.id) && e.entity_type === 'character')
+                .map(e => ({
+                    name: e.name,
+                    description: e.description,
+                    voiceSamples: ((e.properties as Record<string, unknown>)?.voice_samples as Array<{ line: string; context: string }>) || undefined,
+                }));
+            const entityMap = new Map(allEntities.map(e => [e.id, e]));
+            const relationships = allRels
+                .filter(r => connectedIds.includes(r.from_entity_id) || connectedIds.includes(r.to_entity_id))
+                .map(r => ({
+                    from: entityMap.get(r.from_entity_id)?.name || '',
+                    to: entityMap.get(r.to_entity_id)?.name || '',
+                    type: r.relationship_type,
+                    label: r.label,
+                })).filter(r => r.from && r.to);
+
+            const result = await assembleChapter({
+                chapterName: selectedEntity.name,
+                chapterDescription: selectedEntity.description,
+                events: connectedEvents,
+                characters,
+                relationships,
+                projectContext: currentProject?.description,
+            });
+            setChapterBlueprint(result.blueprint);
+            // Auto-save blueprint to chapter properties
+            updateEntity.mutate({
+                id: selectedEntity.id,
+                body: { properties: { ...selectedEntity.properties, chapter_blueprint: result.blueprint } },
+            });
+        } catch (err) {
+            setChapterError(err instanceof Error ? err.message : 'Failed to assemble chapter');
+        } finally {
+            setChapterLoading(false);
+        }
+    };
+
+    // Temporal gap calculation (Feature 12)
+    const handleCalcTemporalGaps = () => {
+        const allEntities = allEntitiesData?.entities || [];
+        const events = allEntities
+            .filter(e => e.entity_type === 'event')
+            .map(e => ({
+                name: e.name,
+                timestamp: (e.properties as Record<string, unknown>)?.timestamp as string | undefined,
+                description: e.description,
+            }));
+        setTemporalGaps(analyzeTemporalGaps(events));
+    };
+
+    // Timestamp save for events (Feature 12)
+    const handleTimestampChange = (timestamp: string) => {
+        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
+        updateEntity.mutate({
+            id: selectedEntity.id,
+            body: { properties: { ...selectedEntity.properties, timestamp } },
+        });
+    };
+
     function handleCreateEntity(e: FormEvent) {
         e.preventDefault();
         let properties = {};
@@ -473,14 +978,56 @@ export default function WorkspacePage() {
                 <div style={{ padding: 'var(--space-2)', borderBottom: '1px solid var(--border)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <button className="btn btn-ghost btn-sm" onClick={() => navigate('/projects')}>← Back</button>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/settings')} title="AI Settings">⚙️</button>
-                            <button className="btn btn-ghost btn-sm" onClick={signOut}>Sign Out</button>
+                        <div style={{ display: 'flex', gap: 4, position: 'relative' }}>
+                            <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/project/${projectId}/analytics`)} title="Analytics">📊</button>
+                            <button className="btn btn-ghost btn-sm" onClick={() => setShowToolsMenu(!showToolsMenu)} title="Tools Menu" style={{ fontSize: 16 }}>⋯</button>
+                            {showToolsMenu && (
+                                <div ref={toolsMenuRef} style={{
+                                    position: 'absolute', top: '100%', right: 0, marginTop: 4,
+                                    background: 'var(--bg-primary)', border: '1px solid var(--border)',
+                                    borderRadius: 'var(--radius-lg)', padding: 'var(--space-1)',
+                                    minWidth: 220, zIndex: 100,
+                                    boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                                    backdropFilter: 'blur(12px)',
+                                }} onClick={e => e.stopPropagation()}>
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', padding: '4px 10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>AI Tools</div>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleBuildSequence(); setShowToolsMenu(false); }} disabled={sequenceLoading} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>📖 Build Reading Sequence</button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleFindGaps(); setShowToolsMenu(false); }} disabled={gapLoading} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>🔍 Find Missing Scenes</button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleAnalyzePOV(); setShowToolsMenu(false); }} disabled={povLoading} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>👁️ Analyze POV Balance</button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleCalcTemporalGaps(); setShowToolsMenu(false); }} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>🕐 Show Temporal Gaps</button>
+                                    {selectedEntity?.entity_type === 'character' && (
+                                        <button className="btn btn-ghost btn-sm" onClick={() => { handleGenerateVoice(); setShowToolsMenu(false); }} disabled={voiceLoading} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>🗣️ Generate Voice Samples</button>
+                                    )}
+                                    <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', padding: '4px 10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Export</div>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleExportWiki(); setShowToolsMenu(false); }} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>📚 Export Wiki (.md)</button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { handleCopyWiki(); setShowToolsMenu(false); }} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>📋 Copy Wiki to Clipboard</button>
+                                    <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { navigate('/settings'); setShowToolsMenu(false); }} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>⚙️ AI Settings</button>
+                                    <button className="btn btn-ghost btn-sm" onClick={signOut} style={{ width: '100%', justifyContent: 'flex-start', padding: '6px 10px', borderRadius: 'var(--radius-md)' }}>🚪 Sign Out</button>
+                                </div>
+                            )}
                         </div>
                     </div>
                     <h2 style={{ fontSize: 'var(--text-md)', fontWeight: 600, marginTop: 'var(--space-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {currentProject?.name || 'Loading...'}
                     </h2>
+                    {/* Active Users (E5-US2) */}
+                    {activeUsers.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                            {activeUsers.map(u => (
+                                <div key={u.userId} title={`${u.userName}${u.editingEntityId ? ' (editing)' : ''}`} style={{
+                                    width: 24, height: 24, borderRadius: '50%',
+                                    background: u.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    fontSize: 11, fontWeight: 700, color: 'white',
+                                    border: u.editingEntityId ? '2px solid #f59e0b' : '2px solid transparent',
+                                    transition: 'border-color 0.2s',
+                                }}>
+                                    {u.userName.charAt(0).toUpperCase()}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
 
                 {/* Search */}
@@ -492,6 +1039,12 @@ export default function WorkspacePage() {
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                     />
+                    <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => { setGlobalSearchOpen(true); setGlobalSearchQuery(''); }}
+                        title="Global Search (⌘K)"
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', padding: '2px 6px', fontSize: 10, color: 'var(--text-tertiary)', border: '1px solid var(--border)', borderRadius: 4 }}
+                    >⌘K</button>
                 </div>
 
                 {/* Entity Filters */}
@@ -1034,15 +1587,17 @@ export default function WorkspacePage() {
                                         )}
                                     </div>
 
-                                    {Object.keys(displayEntity.properties).length > 0 && (
+                                    {Object.keys(displayEntity.properties).filter(k => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level'].includes(k)).length > 0 && (
                                         <div style={{ marginBottom: 'var(--space-3)' }}>
                                             <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Properties</h3>
-                                            {Object.entries(displayEntity.properties).map(([key, value]) => (
-                                                <div key={key} style={{ display: 'flex', gap: 'var(--space-2)', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                                                    <span style={{ fontWeight: 500, minWidth: 120, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
-                                                    <span>{Array.isArray(value) ? value.join(', ') : String(value)}</span>
-                                                </div>
-                                            ))}
+                                            {Object.entries(displayEntity.properties)
+                                                .filter(([key]) => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level'].includes(key))
+                                                .map(([key, value]) => (
+                                                    <div key={key} style={{ display: 'flex', gap: 'var(--space-2)', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                                                        <span style={{ fontWeight: 500, minWidth: 120, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
+                                                        <span>{typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value)}</span>
+                                                    </div>
+                                                ))}
                                         </div>
                                     )}
 
@@ -1488,6 +2043,42 @@ export default function WorkspacePage() {
                             >
                                 ✨ Generate Ideas
                             </button>
+                            {selectedEntity?.entity_type === 'event' && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={handleGenerateScene}
+                                    disabled={sceneLoading}
+                                    style={{ justifyContent: 'flex-start' }}
+                                >
+                                    {sceneLoading ? '⏳ Generating...' : '🎬 Generate Scene Card'}
+                                </button>
+                            )}
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={handleBuildSequence}
+                                disabled={sequenceLoading}
+                                style={{ justifyContent: 'flex-start' }}
+                            >
+                                {sequenceLoading ? '⏳ Building...' : '📖 Build Reading Sequence'}
+                            </button>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={handleFindGaps}
+                                disabled={gapLoading}
+                                style={{ justifyContent: 'flex-start' }}
+                            >
+                                {gapLoading ? '⏳ Scanning...' : '🔍 Find Missing Scenes'}
+                            </button>
+                            {selectedEntity?.entity_type === 'character' && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={handleGenerateVoice}
+                                    disabled={voiceLoading}
+                                    style={{ justifyContent: 'flex-start' }}
+                                >
+                                    {voiceLoading ? '⏳ Generating...' : '🗣️ Generate Voice Samples'}
+                                </button>
+                            )}
                             <button
                                 className="btn btn-secondary btn-sm"
                                 onClick={() => navigate('/settings')}
@@ -1496,6 +2087,414 @@ export default function WorkspacePage() {
                                 ⚙️ AI Settings
                             </button>
                         </div>
+
+                        {/* Scene Card Display */}
+                        {sceneError && (
+                            <div style={{ marginTop: 'var(--space-2)', padding: 'var(--space-2)', background: 'var(--danger-muted)', borderRadius: 'var(--radius-md)', fontSize: 'var(--text-sm)', color: 'var(--danger)' }}>
+                                ❌ {sceneError}
+                            </div>
+                        )}
+                        {sceneCard && (
+                            <div style={{
+                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                background: 'linear-gradient(135deg, rgba(234,179,8,0.08), rgba(249,115,22,0.06))',
+                                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(234,179,8,0.2)',
+                            }}>
+                                <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                    🎬 Scene Card
+                                    <button
+                                        className="btn btn-ghost btn-sm"
+                                        onClick={handleGenerateScene}
+                                        disabled={sceneLoading}
+                                        title="Regenerate with AI"
+                                        style={{ padding: '0 6px', fontSize: 11 }}
+                                    >
+                                        {sceneLoading ? '⏳' : '🔄'}
+                                    </button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { setSceneCard(null); if (selectedEntity) updateEntity.mutate({ id: selectedEntity.id, body: { properties: { ...selectedEntity.properties, scene_card: undefined } } }); }} style={{ marginLeft: 'auto', padding: '0 4px', fontSize: 10 }}>✕</button>
+                                </h4>
+                                {([
+                                    { label: '👤 POV', field: 'pov' as keyof SceneCard },
+                                    { label: '🎯 Goal', field: 'goal' as keyof SceneCard },
+                                    { label: '⚔️ Conflict', field: 'conflict' as keyof SceneCard },
+                                    { label: '🏁 Resolution', field: 'resolution' as keyof SceneCard },
+                                    { label: '🌍 Setting', field: 'settingNotes' as keyof SceneCard },
+                                ] as const).map(({ label, field }) => sceneCard[field] && (
+                                    <div key={label} style={{ marginBottom: 'var(--space-1)' }}>
+                                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontWeight: 600, cursor: 'pointer' }} onClick={() => { setEditingSceneField(field); setSceneFieldDraft(sceneCard[field]); }}>{label} ✏️</span>
+                                        {editingSceneField === field ? (
+                                            <div style={{ marginTop: 2 }}>
+                                                <textarea
+                                                    className="input"
+                                                    value={sceneFieldDraft}
+                                                    onChange={e => setSceneFieldDraft(e.target.value)}
+                                                    rows={3}
+                                                    style={{ fontSize: 'var(--text-sm)', width: '100%', resize: 'vertical' }}
+                                                    autoFocus
+                                                />
+                                                <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                                                    <button className="btn btn-primary btn-sm" onClick={() => saveSceneField(field, sceneFieldDraft)} style={{ padding: '2px 8px', fontSize: 11 }}>Save</button>
+                                                    <button className="btn btn-ghost btn-sm" onClick={() => setEditingSceneField(null)} style={{ padding: '2px 8px', fontSize: 11 }}>Cancel</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p style={{ fontSize: 'var(--text-sm)', margin: '2px 0 0', lineHeight: 1.4, cursor: 'pointer' }} onClick={() => { setEditingSceneField(field); setSceneFieldDraft(sceneCard[field]); }}>{sceneCard[field]}</p>
+                                        )}
+                                    </div>
+                                ))}
+                                {sceneCard.openingLine && (
+                                    <div style={{ marginTop: 'var(--space-2)' }}>
+                                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontWeight: 600, cursor: 'pointer' }} onClick={() => { setEditingSceneField('openingLine'); setSceneFieldDraft(sceneCard.openingLine); }}>📝 Opening Line ✏️</span>
+                                        {editingSceneField === 'openingLine' ? (
+                                            <div style={{ marginTop: 2 }}>
+                                                <textarea
+                                                    className="input"
+                                                    value={sceneFieldDraft}
+                                                    onChange={e => setSceneFieldDraft(e.target.value)}
+                                                    rows={2}
+                                                    style={{ fontSize: 'var(--text-sm)', width: '100%', resize: 'vertical' }}
+                                                    autoFocus
+                                                />
+                                                <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                                                    <button className="btn btn-primary btn-sm" onClick={() => saveSceneField('openingLine', sceneFieldDraft)} style={{ padding: '2px 8px', fontSize: 11 }}>Save</button>
+                                                    <button className="btn btn-ghost btn-sm" onClick={() => setEditingSceneField(null)} style={{ padding: '2px 8px', fontSize: 11 }}>Cancel</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', fontStyle: 'italic', fontSize: 'var(--text-sm)', borderLeft: '3px solid var(--accent)', cursor: 'pointer' }} onClick={() => { setEditingSceneField('openingLine'); setSceneFieldDraft(sceneCard.openingLine); }}>
+                                                "{sceneCard.openingLine}"
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Voice Samples Display (characters only) */}
+                        {voiceError && (
+                            <div style={{ marginTop: 'var(--space-2)', padding: 'var(--space-2)', background: 'var(--danger-muted)', borderRadius: 'var(--radius-md)', fontSize: 'var(--text-sm)', color: 'var(--danger)' }}>
+                                ❌ {voiceError}
+                            </div>
+                        )}
+                        {voiceSamples.length > 0 && (
+                            <div style={{
+                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                background: 'linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.06))',
+                                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(139,92,246,0.2)',
+                            }}>
+                                <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                    🗣️ Character Voice
+                                    <button
+                                        className="btn btn-ghost btn-sm"
+                                        onClick={handleGenerateVoice}
+                                        disabled={voiceLoading}
+                                        title="Regenerate voice samples"
+                                        style={{ padding: '0 6px', fontSize: 11 }}
+                                    >
+                                        {voiceLoading ? '⏳' : '🔄'}
+                                    </button>
+                                    <button className="btn btn-ghost btn-sm" onClick={() => { setVoiceSamples([]); if (selectedEntity) updateEntity.mutate({ id: selectedEntity.id, body: { properties: { ...selectedEntity.properties, voice_samples: undefined } } }); }} style={{ marginLeft: 'auto', padding: '0 4px', fontSize: 10 }}>✕</button>
+                                </h4>
+                                {voiceSamples.map((sample, idx) => (
+                                    <div key={idx} style={{ marginBottom: 'var(--space-2)' }}>
+                                        {editingVoiceIdx === idx ? (
+                                            <div>
+                                                <textarea
+                                                    className="input"
+                                                    value={voiceLineDraft}
+                                                    onChange={e => setVoiceLineDraft(e.target.value)}
+                                                    rows={2}
+                                                    style={{ fontSize: 'var(--text-sm)', width: '100%', resize: 'vertical', fontStyle: 'italic' }}
+                                                    autoFocus
+                                                    placeholder="Dialogue line…"
+                                                />
+                                                <input
+                                                    className="input"
+                                                    value={voiceCtxDraft}
+                                                    onChange={e => setVoiceCtxDraft(e.target.value)}
+                                                    style={{ fontSize: 'var(--text-xs)', width: '100%', marginTop: 4 }}
+                                                    placeholder="Context note…"
+                                                />
+                                                <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                                                    <button className="btn btn-primary btn-sm" onClick={() => {
+                                                        const updated = [...voiceSamples];
+                                                        updated[idx] = { line: voiceLineDraft, context: voiceCtxDraft };
+                                                        setVoiceSamples(updated);
+                                                        setEditingVoiceIdx(null);
+                                                        if (selectedEntity) updateEntity.mutate({ id: selectedEntity.id, body: { properties: { ...selectedEntity.properties, voice_samples: updated } } });
+                                                    }} style={{ padding: '2px 8px', fontSize: 11 }}>Save</button>
+                                                    <button className="btn btn-ghost btn-sm" onClick={() => setEditingVoiceIdx(null)} style={{ padding: '2px 8px', fontSize: 11 }}>Cancel</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div>
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', fontStyle: 'italic', fontSize: 'var(--text-sm)', borderLeft: '3px solid rgba(139,92,246,0.6)', cursor: 'pointer' }} onClick={() => { setEditingVoiceIdx(idx); setVoiceLineDraft(sample.line); setVoiceCtxDraft(sample.context); }} title="Click to edit">
+                                                    "{sample.line}"
+                                                </div>
+                                                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 2, display: 'block', cursor: 'pointer' }} onClick={() => { setEditingVoiceIdx(idx); setVoiceLineDraft(sample.line); setVoiceCtxDraft(sample.context); }}>{sample.context}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Emotional Beat Tracker (events only) */}
+                        {selectedEntity?.entity_type === 'event' && (
+                            <div style={{
+                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                background: `linear-gradient(135deg, ${emotionLevel > 0 ? 'rgba(34,197,94,0.08)' : emotionLevel < 0 ? 'rgba(239,68,68,0.08)' : 'rgba(128,128,128,0.08)'}, transparent)`,
+                                borderRadius: 'var(--radius-lg)', border: `1px solid ${emotionLevel > 0 ? 'rgba(34,197,94,0.3)' : emotionLevel < 0 ? 'rgba(239,68,68,0.3)' : 'rgba(128,128,128,0.2)'}`,
+                            }}>
+                                <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                    {emotionLevel >= 3 ? '😄' : emotionLevel >= 1 ? '🙂' : emotionLevel <= -3 ? '😢' : emotionLevel <= -1 ? '😟' : '😐'} Emotional Beat
+                                    <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                                        {emotionLevel > 0 ? `+${emotionLevel}` : emotionLevel} / 5
+                                    </span>
+                                </h4>
+                                <input
+                                    type="range"
+                                    min={-5}
+                                    max={5}
+                                    value={emotionLevel}
+                                    onChange={e => handleEmotionChange(Number(e.target.value))}
+                                    style={{ width: '100%', accentColor: emotionLevel > 0 ? '#22c55e' : emotionLevel < 0 ? '#ef4444' : '#888' }}
+                                />
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 2 }}>
+                                    <span>😢 Despair</span>
+                                    <span>😐 Neutral</span>
+                                    <span>😄 Triumph</span>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* POV Character Dropdown (events only) */}
+                        {selectedEntity?.entity_type === 'event' && (() => {
+                            const allEntities = allEntitiesData?.entities || [];
+                            const characters = allEntities.filter(e => e.entity_type === 'character');
+                            const currentPOV = (selectedEntity.properties as Record<string, unknown>)?.pov_character as { id: string; name: string } | null;
+                            return (
+                                <div style={{
+                                    marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                    background: 'linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.06))',
+                                    borderRadius: 'var(--radius-lg)', border: '1px solid rgba(99,102,241,0.15)',
+                                }}>
+                                    <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                        👁️ POV Character
+                                    </h4>
+                                    <select
+                                        className="input"
+                                        value={currentPOV?.id || ''}
+                                        onChange={e => handlePOVChange(e.target.value)}
+                                        style={{ width: '100%', fontSize: 'var(--text-sm)' }}
+                                    >
+                                        <option value="">— No POV assigned —</option>
+                                        {characters.map(c => (
+                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                        ))}
+                                    </select>
+                                    {currentPOV && (
+                                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 4 }}>
+                                            This scene is told from {currentPOV.name}'s perspective
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
+
+                        {/* Timestamp (events only — Feature 12) */}
+                        {selectedEntity?.entity_type === 'event' && (
+                            <div style={{
+                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                background: 'rgba(100,116,139,0.06)',
+                                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(100,116,139,0.15)',
+                            }}>
+                                <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--space-2)' }}>
+                                    🕐 Temporal Position
+                                </h4>
+                                <input
+                                    type="date"
+                                    className="input"
+                                    value={((selectedEntity.properties as Record<string, unknown>)?.timestamp as string) || ''}
+                                    onChange={e => handleTimestampChange(e.target.value)}
+                                    style={{ width: '100%', fontSize: 'var(--text-sm)' }}
+                                />
+                                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+                                    Set in-story date for temporal distance tracking
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Draft Integration (events only — Feature 10) */}
+                        {selectedEntity?.entity_type === 'event' && (
+                            <div style={{
+                                marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                background: 'rgba(100,116,139,0.06)',
+                                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(100,116,139,0.15)',
+                            }}>
+                                <h4
+                                    style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: showDraftSection ? 'var(--space-2)' : 0, cursor: 'pointer' }}
+                                    onClick={() => {
+                                        setShowDraftSection(!showDraftSection);
+                                        if (!showDraftSection) {
+                                            setDraftText(((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || '');
+                                        }
+                                    }}
+                                >
+                                    📝 Draft Text
+                                    {(() => {
+                                        const dt = ((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || '';
+                                        const wc = dt ? dt.split(/\s+/).filter(Boolean).length : 0;
+                                        return wc > 0 ? <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--accent)', fontWeight: 500 }}>{wc.toLocaleString()}w</span> : null;
+                                    })()}
+                                    <span style={{ marginLeft: showDraftSection ? 0 : 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>{showDraftSection ? '▼' : '▶'}</span>
+                                </h4>
+                                {showDraftSection && (
+                                    <>
+                                        <textarea
+                                            className="textarea"
+                                            value={draftText}
+                                            onChange={e => setDraftText(e.target.value)}
+                                            onBlur={e => handleSaveDraft(e.target.value)}
+                                            rows={8}
+                                            placeholder="Paste or write your scene draft here..."
+                                            style={{ width: '100%', fontSize: 'var(--text-sm)', fontFamily: 'Georgia, serif', lineHeight: 1.7 }}
+                                        />
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+                                            <span>{draftText.split(/\s+/).filter(Boolean).length.toLocaleString()} words</span>
+                                            <span>Auto-saves on blur</span>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Chapter Assembler (chapter entities only — Feature 5) */}
+                        {selectedEntity?.entity_type === 'chapter' && (() => {
+                            const allEntities = allEntitiesData?.entities || [];
+                            const allRels = (relationshipsData?.relationships || []) as Relationship[];
+                            const connectedIds = allRels
+                                .filter(r => r.from_entity_id === selectedEntity.id || r.to_entity_id === selectedEntity.id)
+                                .map(r => r.from_entity_id === selectedEntity.id ? r.to_entity_id : r.from_entity_id);
+                            const connectedEvents = allEntities.filter(e => connectedIds.includes(e.id) && e.entity_type === 'event');
+                            const savedBlueprint = (selectedEntity.properties as Record<string, unknown>)?.chapter_blueprint as ChapterBlueprint | undefined;
+                            const bp = chapterBlueprint || savedBlueprint;
+                            const estWords = connectedEvents.length * 2000;
+                            const draftedWords = connectedEvents.reduce((sum, e) => {
+                                const dt = (e.properties as Record<string, unknown>)?.draft_text as string | undefined;
+                                return sum + (dt ? dt.split(/\s+/).filter(Boolean).length : 0);
+                            }, 0);
+
+                            return (
+                                <div style={{
+                                    marginTop: 'var(--space-2)', padding: 'var(--space-3)',
+                                    background: 'linear-gradient(135deg, rgba(245,158,11,0.08), rgba(251,146,60,0.06))',
+                                    borderRadius: 'var(--radius-lg)', border: '1px solid rgba(245,158,11,0.2)',
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+                                        <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                            📖 Chapter Assembly
+                                        </h4>
+                                        <button
+                                            className="btn btn-primary btn-sm"
+                                            onClick={handleAssembleChapter}
+                                            disabled={chapterLoading || connectedEvents.length === 0}
+                                            style={{ gap: 4, fontSize: 'var(--text-xs)' }}
+                                        >
+                                            {chapterLoading ? <><div className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Assembling...</> : '🔮 Assemble'}
+                                        </button>
+                                    </div>
+
+                                    {/* Connected events summary */}
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: 'var(--space-2)' }}>
+                                        <span style={{ fontWeight: 600 }}>{connectedEvents.length}</span> scenes linked
+                                        {' · '}
+                                        <span style={{ fontWeight: 600 }}>~{estWords.toLocaleString()}</span>w estimated
+                                        {draftedWords > 0 && <>{' · '}<span style={{ color: 'var(--accent)', fontWeight: 600 }}>{draftedWords.toLocaleString()}</span>w drafted</>}
+                                    </div>
+
+                                    {/* Progress bar */}
+                                    {estWords > 0 && (
+                                        <div style={{ height: 4, borderRadius: 2, background: 'rgba(100,116,139,0.2)', marginBottom: 'var(--space-2)', overflow: 'hidden' }}>
+                                            <div style={{ height: '100%', width: `${Math.min(100, (draftedWords / estWords) * 100)}%`, background: 'var(--accent)', borderRadius: 2, transition: 'width 0.3s ease' }} />
+                                        </div>
+                                    )}
+
+                                    {connectedEvents.length === 0 && (
+                                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', padding: 'var(--space-2)', textAlign: 'center', background: 'rgba(0,0,0,0.15)', borderRadius: 'var(--radius-md)' }}>
+                                            Link event entities to this chapter using relationships to begin
+                                        </div>
+                                    )}
+
+                                    {chapterError && (
+                                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--error)', padding: 'var(--space-1)', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius-md)', marginTop: 4 }}>
+                                            {chapterError}
+                                        </div>
+                                    )}
+
+                                    {/* Blueprint display */}
+                                    {bp && (
+                                        <div style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)' }}>
+                                            <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-1)' }}>
+                                                <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>Synopsis</div>
+                                                <div style={{ color: 'var(--text-primary)', lineHeight: 1.5 }}>{bp.synopsis}</div>
+                                            </div>
+
+                                            {bp.openingHook && (
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(34,197,94,0.08)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-1)', borderLeft: '3px solid rgba(34,197,94,0.5)' }}>
+                                                    <div style={{ fontWeight: 600, color: '#22c55e', marginBottom: 2 }}>🎣 Opening Hook</div>
+                                                    <div style={{ fontStyle: 'italic', color: 'var(--text-primary)' }}>"{bp.openingHook}"</div>
+                                                </div>
+                                            )}
+
+                                            {bp.structure && bp.structure.length > 0 && (
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-1)' }}>
+                                                    <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>Structure</div>
+                                                    {bp.structure.map((s, i) => (
+                                                        <div key={i} style={{ padding: '4px 0', borderBottom: i < bp.structure.length - 1 ? '1px solid rgba(100,116,139,0.1)' : 'none', display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                                                            <span style={{
+                                                                padding: '1px 6px', borderRadius: 'var(--radius-full)', fontSize: '10px', fontWeight: 600, textTransform: 'uppercase',
+                                                                background: s.beat === 'climax' ? 'rgba(239,68,68,0.2)' : s.beat === 'rising' ? 'rgba(34,197,94,0.2)' : s.beat === 'resolution' ? 'rgba(99,102,241,0.2)' : 'rgba(100,116,139,0.2)',
+                                                                color: s.beat === 'climax' ? '#ef4444' : s.beat === 'rising' ? '#22c55e' : s.beat === 'resolution' ? '#6366f1' : '#94a3b8',
+                                                            }}>{s.beat}</span>
+                                                            <span style={{ color: 'var(--text-primary)' }}>{s.scene}</span>
+                                                            <span style={{ marginLeft: 'auto', color: 'var(--text-tertiary)', fontStyle: 'italic' }}>{s.emotionalNote}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {bp.closingHook && (
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(245,158,11,0.08)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-1)', borderLeft: '3px solid rgba(245,158,11,0.5)' }}>
+                                                    <div style={{ fontWeight: 600, color: '#f59e0b', marginBottom: 2 }}>🔗 Closing Hook</div>
+                                                    <div style={{ fontStyle: 'italic', color: 'var(--text-primary)' }}>"{bp.closingHook}"</div>
+                                                </div>
+                                            )}
+
+                                            {bp.tensions && bp.tensions.length > 0 && (
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-1)' }}>
+                                                    <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>⚡ Unresolved Tensions</div>
+                                                    {bp.tensions.map((t, i) => (
+                                                        <div key={i} style={{ padding: '2px 0', color: 'var(--text-primary)' }}>• {t}</div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {bp.characterArcs && bp.characterArcs.length > 0 && (
+                                                <div style={{ padding: 'var(--space-2)', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)' }}>
+                                                    <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>👤 Character Arcs</div>
+                                                    {bp.characterArcs.map((ca, i) => (
+                                                        <div key={i} style={{ padding: '2px 0', color: 'var(--text-primary)' }}>
+                                                            <span style={{ fontWeight: 600, color: 'var(--accent)' }}>{ca.character}</span>: {ca.arc}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
                     </div>
                 </aside>
             )}
@@ -1783,7 +2782,7 @@ export default function WorkspacePage() {
                             onChange={(e) => setRelType(e.target.value)}
                             style={{ width: '100%', marginBottom: 'var(--space-2)' }}
                         >
-                            {['involves', 'causes', 'blocks', 'references', 'inspires', 'parent_of', 'sibling_of'].map(t => (
+                            {['arrives_before', 'blocks', 'branches_into', 'causes', 'costs', 'could_restore', 'creates', 'currently_in', 'ends_at', 'exists_in', 'inspires', 'involves', 'located_at', 'makes', 'means', 'motivates', 'originates_in', 'parent_of', 'prevents', 'references', 'requires', 'separates', 'sibling_of', 'threatens'].map(t => (
                                 <option key={t} value={t}>{t}</option>
                             ))}
                         </select>
@@ -1796,7 +2795,20 @@ export default function WorkspacePage() {
                             placeholder="e.g. defeats, mentors, discovers"
                             value={relLabel}
                             onChange={(e) => setRelLabel(e.target.value)}
-                            style={{ width: '100%', marginBottom: 'var(--space-3)' }}
+                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                        />
+
+                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            💪 Strength
+                            <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--accent)', fontWeight: 600 }}>{relStrength}/5</span>
+                        </label>
+                        <input
+                            type="range"
+                            min={1}
+                            max={5}
+                            value={relStrength}
+                            onChange={e => setRelStrength(Number(e.target.value))}
+                            style={{ width: '100%', marginBottom: 'var(--space-3)', accentColor: 'var(--accent)' }}
                         />
 
                         <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
@@ -1811,11 +2823,304 @@ export default function WorkspacePage() {
                                         to_entity_id: relToId,
                                         relationship_type: relType,
                                         label: relLabel || undefined,
+                                        metadata: { strength: relStrength },
                                     });
                                 }}
                             >
                                 {createRelationship.isPending ? 'Creating…' : 'Create'}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ─── Global Search Overlay (⌘K) ──────────────── */}
+            {globalSearchOpen && (
+                <div
+                    style={{
+                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+                        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+                        paddingTop: '15vh', zIndex: 9999,
+                    }}
+                    onClick={() => setGlobalSearchOpen(false)}
+                >
+                    <div
+                        style={{
+                            background: 'var(--bg-primary)', borderRadius: 'var(--radius-lg)',
+                            border: '1px solid var(--border)', width: '90%', maxWidth: 560,
+                            boxShadow: '0 25px 50px rgba(0,0,0,0.5)', overflow: 'hidden',
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {/* Search Input */}
+                        <div style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '12px 16px', borderBottom: '1px solid var(--border)',
+                        }}>
+                            <span style={{ fontSize: 18 }}>🔍</span>
+                            <input
+                                ref={globalSearchRef}
+                                className="input"
+                                placeholder="Search all entities..."
+                                value={globalSearchQuery}
+                                onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                                style={{
+                                    border: 'none', background: 'transparent',
+                                    fontSize: 'var(--text-md)', flex: 1, outline: 'none',
+                                }}
+                            />
+                            <kbd style={{
+                                padding: '2px 6px', borderRadius: 4, fontSize: 11,
+                                color: 'var(--text-tertiary)', border: '1px solid var(--border)',
+                                background: 'var(--bg-secondary)',
+                            }}>ESC</kbd>
+                        </div>
+
+                        {/* Results */}
+                        <div style={{ maxHeight: 400, overflowY: 'auto', padding: '8px 0' }}>
+                            {globalSearchQuery.length < 2 && (
+                                <p style={{
+                                    padding: '16px', textAlign: 'center',
+                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
+                                }}>
+                                    Type at least 2 characters to search...
+                                </p>
+                            )}
+
+                            {globalSearchData && Object.entries(globalSearchData.grouped).map(([type, items]) => (
+                                <div key={type}>
+                                    <div style={{
+                                        padding: '6px 16px', fontSize: 11, fontWeight: 600,
+                                        color: 'var(--text-tertiary)', textTransform: 'uppercase',
+                                        letterSpacing: 1,
+                                    }}>
+                                        {ENTITY_ICONS[type] || '📄'} {type}s ({items.length})
+                                    </div>
+                                    {items.map((entity: Entity) => (
+                                        <button
+                                            key={entity.id}
+                                            onClick={() => {
+                                                setSelectedEntity(entity);
+                                                setGlobalSearchOpen(false);
+                                            }}
+                                            style={{
+                                                display: 'flex', alignItems: 'center', gap: 8,
+                                                width: '100%', padding: '8px 16px', border: 'none',
+                                                background: 'transparent', cursor: 'pointer',
+                                                color: 'var(--text-primary)', fontSize: 'var(--text-sm)',
+                                                textAlign: 'left', transition: 'background 0.1s',
+                                            }}
+                                            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                                        >
+                                            <span style={{ fontSize: 16 }}>{ENTITY_ICONS[entity.entity_type] || '📄'}</span>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                    {entity.name}
+                                                </div>
+                                                {entity.description && (
+                                                    <div style={{
+                                                        fontSize: 11, color: 'var(--text-tertiary)',
+                                                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                    }}>
+                                                        {entity.description.slice(0, 80)}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            ))}
+
+                            {globalSearchQuery.length >= 2 && globalSearchData && globalSearchData.results.length === 0 && (
+                                <p style={{
+                                    padding: '16px', textAlign: 'center',
+                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
+                                }}>
+                                    No results found for "{globalSearchQuery}"
+                                </p>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Narrative Sequence Modal */}
+            {showSequenceModal && (
+                <div className="modal-overlay" onClick={() => setShowSequenceModal(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600, maxHeight: '80vh', overflow: 'auto' }}>
+                        <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            📖 Narrative Sequence
+                            <button className="btn btn-ghost btn-sm" onClick={() => setShowSequenceModal(false)} style={{ marginLeft: 'auto' }}>✕</button>
+                        </h2>
+                        {sequenceLoading && (
+                            <div style={{ textAlign: 'center', padding: 'var(--space-4)' }}>
+                                <div className="spinner" style={{ width: 32, height: 32, borderWidth: 3, margin: '0 auto' }} />
+                                <p style={{ marginTop: 'var(--space-2)', color: 'var(--text-secondary)' }}>AI is analyzing event order...</p>
+                            </div>
+                        )}
+                        {sequenceError && (
+                            <div style={{ padding: 'var(--space-2)', background: 'var(--danger-muted)', borderRadius: 'var(--radius-md)', color: 'var(--danger)', fontSize: 'var(--text-sm)' }}>
+                                ❌ {sequenceError}
+                            </div>
+                        )}
+                        {sequenceSteps.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                                {sequenceSteps.sort((a, b) => a.chapterNumber - b.chapterNumber).map((step, i) => (
+                                    <div key={i} style={{
+                                        display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-start',
+                                        padding: 'var(--space-2)', background: 'var(--bg-secondary)',
+                                        borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                                    }}>
+                                        <div style={{
+                                            minWidth: 36, height: 36, borderRadius: '50%',
+                                            background: 'var(--accent)', color: '#000', fontWeight: 700,
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            fontSize: 'var(--text-sm)',
+                                        }}>{step.chapterNumber}</div>
+                                        <div style={{ flex: 1 }}>
+                                            <p style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>⚡ {step.entityName}</p>
+                                            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{step.reasoning}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {!sequenceLoading && sequenceSteps.length === 0 && !sequenceError && (
+                            <p style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: 'var(--space-3)' }}>No events to sequence. Add some event entities first.</p>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Missing Scenes Modal */}
+            {showGapsModal && (
+                <div className="modal-overlay" onClick={() => setShowGapsModal(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600, maxHeight: '80vh', overflow: 'auto' }}>
+                        <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            🔍 Missing Scenes
+                            <button className="btn btn-ghost btn-sm" onClick={() => setShowGapsModal(false)} style={{ marginLeft: 'auto' }}>✕</button>
+                        </h2>
+                        {gapLoading && (
+                            <div style={{ textAlign: 'center', padding: 'var(--space-4)' }}>
+                                <div className="spinner" style={{ width: 32, height: 32, borderWidth: 3, margin: '0 auto' }} />
+                                <p style={{ marginTop: 'var(--space-2)', color: 'var(--text-secondary)' }}>AI is scanning for narrative gaps...</p>
+                            </div>
+                        )}
+                        {gapError && (
+                            <div style={{ padding: 'var(--space-2)', background: 'var(--danger-muted)', borderRadius: 'var(--radius-md)', color: 'var(--danger)', fontSize: 'var(--text-sm)' }}>
+                                ❌ {gapError}
+                            </div>
+                        )}
+                        {gapScenes.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                                {gapScenes.map(gap => (
+                                    <div key={gap.id} style={{
+                                        padding: 'var(--space-2)', background: 'var(--bg-secondary)',
+                                        borderRadius: 'var(--radius-md)', border: '1px dashed rgba(234,179,8,0.4)',
+                                    }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                            <p style={{ fontWeight: 600, fontSize: 'var(--text-sm)', color: 'var(--warning)' }}>⚡ {gap.title}</p>
+                                            <div style={{ display: 'flex', gap: 4 }}>
+                                                <button className="btn btn-primary btn-sm" onClick={() => createEventFromGap(gap)} style={{ padding: '2px 8px', fontSize: 11 }}>✅ Create</button>
+                                                <button className="btn btn-ghost btn-sm" onClick={() => setGapScenes(prev => prev.filter(g => g.id !== gap.id))} style={{ padding: '2px 6px', fontSize: 11 }}>✕</button>
+                                            </div>
+                                        </div>
+                                        <p style={{ fontSize: 'var(--text-sm)', margin: '4px 0', lineHeight: 1.4 }}>{gap.description}</p>
+                                        <div style={{ display: 'flex', gap: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                                            {gap.afterEvent && <span>After: <strong>{gap.afterEvent}</strong></span>}
+                                            {gap.beforeEvent && <span>Before: <strong>{gap.beforeEvent}</strong></span>}
+                                        </div>
+                                        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 4, fontStyle: 'italic' }}>{gap.reason}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {!gapLoading && gapScenes.length === 0 && !gapError && (
+                            <p style={{ textAlign: 'center', color: 'var(--success)', padding: 'var(--space-3)' }}>✅ No narrative gaps detected! Your story is well-connected.</p>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* POV Analysis Results Panel */}
+            {povIssues.length > 0 && (
+                <div className="modal-overlay" onClick={() => setPovIssues([])}>
+                    <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 550, maxHeight: '80vh', overflow: 'auto' }}>
+                        <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            👁️ POV Balance Analysis
+                            <button className="btn btn-ghost btn-sm" onClick={() => setPovIssues([])} style={{ marginLeft: 'auto' }}>✕</button>
+                        </h2>
+                        {/* Distribution chart */}
+                        {Object.keys(povDistribution).length > 0 && (
+                            <div style={{ marginBottom: 'var(--space-3)' }}>
+                                <h4 style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginBottom: 'var(--space-1)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>POV Distribution</h4>
+                                {Object.entries(povDistribution).sort((a, b) => b[1] - a[1]).map(([char, count]) => {
+                                    const total = Object.values(povDistribution).reduce((a, b) => a + b, 0);
+                                    const pct = Math.round((count / total) * 100);
+                                    return (
+                                        <div key={char} style={{ marginBottom: 4 }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', marginBottom: 2 }}>
+                                                <span style={{ fontWeight: 600 }}>{char}</span>
+                                                <span style={{ color: 'var(--text-tertiary)' }}>{count} scenes ({pct}%)</span>
+                                            </div>
+                                            <div style={{ height: 6, borderRadius: 3, background: 'rgba(100,116,139,0.2)', overflow: 'hidden' }}>
+                                                <div style={{ height: '100%', width: `${pct}%`, background: 'var(--accent)', borderRadius: 3, transition: 'width 0.3s ease' }} />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                        {/* Issues list */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+                            {povIssues.map(issue => (
+                                <div key={issue.id} style={{
+                                    padding: 'var(--space-2)', borderRadius: 'var(--radius-md)',
+                                    background: issue.severity === 'error' ? 'rgba(239,68,68,0.08)' : issue.severity === 'warning' ? 'rgba(245,158,11,0.08)' : 'rgba(99,102,241,0.08)',
+                                    border: `1px solid ${issue.severity === 'error' ? 'rgba(239,68,68,0.2)' : issue.severity === 'warning' ? 'rgba(245,158,11,0.2)' : 'rgba(99,102,241,0.15)'}`,
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                                        <span>{issue.severity === 'error' ? '🔴' : issue.severity === 'warning' ? '🟡' : '💡'}</span>
+                                        <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{issue.title}</span>
+                                    </div>
+                                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>{issue.description}</p>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Temporal Gaps Results Panel */}
+            {temporalGaps.length > 0 && (
+                <div className="modal-overlay" onClick={() => setTemporalGaps([])}>
+                    <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 550, maxHeight: '80vh', overflow: 'auto' }}>
+                        <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            🕐 Temporal Gaps
+                            <button className="btn btn-ghost btn-sm" onClick={() => setTemporalGaps([])} style={{ marginLeft: 'auto' }}>✕</button>
+                        </h2>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                            {temporalGaps.map(gap => (
+                                <div key={gap.id} style={{
+                                    padding: 'var(--space-2)', borderRadius: 'var(--radius-md)',
+                                    background: gap.warning ? 'rgba(245,158,11,0.08)' : 'var(--bg-secondary)',
+                                    border: `1px solid ${gap.warning ? 'rgba(245,158,11,0.2)' : 'var(--border)'}`,
+                                }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                                        <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>{gap.gapLabel}</span>
+                                        {gap.warning && <span style={{ fontSize: 'var(--text-xs)', color: 'var(--warning)' }}>⚠️</span>}
+                                    </div>
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        <span style={{ fontWeight: 600 }}>{gap.fromEvent}</span>
+                                        <span style={{ color: 'var(--text-tertiary)' }}>→</span>
+                                        <span style={{ fontWeight: 600 }}>{gap.toEvent}</span>
+                                    </div>
+                                    {gap.warning && (
+                                        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--warning)', marginTop: 4, fontStyle: 'italic' }}>{gap.warning}</p>
+                                    )}
+                                </div>
+                            ))}
                         </div>
                     </div>
                 </div>

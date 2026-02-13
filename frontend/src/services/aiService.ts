@@ -828,3 +828,958 @@ export async function analyzeRippleEffects(
         'No AI provider configured. Go to Settings to add your API key.'
     );
 }
+
+// ─── Scene Card Generator (Advanced Feature 1) ─────────────
+export interface SceneCard {
+    pov: string;
+    goal: string;
+    conflict: string;
+    resolution: string;
+    settingNotes: string;
+    openingLine: string;
+}
+
+export interface SceneCardResult {
+    sceneCard: SceneCard;
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export interface GenerateSceneRequest {
+    eventName: string;
+    eventDescription: string;
+    connectedCharacters: Array<{ name: string; description: string }>;
+    connectedLocations: Array<{ name: string; description: string }>;
+    connectedThemes: Array<{ name: string; description: string }>;
+    projectContext?: string;
+}
+
+function buildScenePrompt(req: GenerateSceneRequest): string {
+    let prompt = `You are a professional novel scene architect for a narrative tool called Chronos.
+
+## Task
+Generate a detailed scene outline for the following event. The scene should be vivid, actionable, and ready-to-write.
+
+## Event
+- **Name:** ${req.eventName}
+- **Description:** ${req.eventDescription}
+`;
+
+    if (req.connectedCharacters.length > 0) {
+        prompt += `\n## Characters in this scene\n`;
+        req.connectedCharacters.forEach(c => {
+            prompt += `- **${c.name}**: ${c.description}\n`;
+        });
+    }
+    if (req.connectedLocations.length > 0) {
+        prompt += `\n## Location\n`;
+        req.connectedLocations.forEach(l => {
+            prompt += `- **${l.name}**: ${l.description}\n`;
+        });
+    }
+    if (req.connectedThemes.length > 0) {
+        prompt += `\n## Themes\n`;
+        req.connectedThemes.forEach(t => {
+            prompt += `- **${t.name}**: ${t.description}\n`;
+        });
+    }
+    if (req.projectContext) {
+        prompt += `\n## Project Context\n${req.projectContext}\n`;
+    }
+
+    prompt += `
+## Instructions
+Generate a scene outline covering:
+1. **POV**: Which character's perspective (pick the most compelling)
+2. **Goal**: What the POV character wants in this scene
+3. **Conflict**: What opposes that goal
+4. **Resolution**: How the scene ends (cliffhanger, revelation, escalation, etc.)
+5. **Setting Notes**: Sensory details (sight, sound, smell, atmosphere)
+6. **Opening Line**: A strong first sentence for this scene
+
+Respond ONLY with valid JSON:
+{
+  "pov": "Character Name",
+  "goal": "What they want...",
+  "conflict": "What opposes them...",
+  "resolution": "How it ends...",
+  "settingNotes": "Sensory details...",
+  "openingLine": "The first sentence..."
+}`;
+    return prompt;
+}
+
+export async function generateSceneCard(
+    req: GenerateSceneRequest,
+    settings?: AISettings
+): Promise<SceneCardResult> {
+    const aiSettings = settings || loadAISettings();
+
+    const cacheKey = `scene:${req.eventName}:${req.eventDescription.slice(0, 50)}`;
+    const cached = getCached<SceneCardResult>(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    const prompt = buildScenePrompt(req);
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    const allProviders: AIProvider[] = ['openai', 'anthropic', 'google'];
+    for (const p of allProviders) {
+        if (!providers.includes(p)) providers.push(p);
+    }
+
+    let lastError: Error | null = null;
+    for (const provider of providers) {
+        const apiKey = aiSettings.apiKeys[provider];
+        if (!apiKey) continue;
+        const model = provider === aiSettings.defaultProvider
+            ? aiSettings.defaultModel
+            : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const raw = await callProvider(provider, model, prompt, apiKey);
+            let jsonStr = raw;
+            const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            const parsed = JSON.parse(jsonStr.trim());
+
+            const sceneCard: SceneCard = {
+                pov: parsed.pov || '',
+                goal: parsed.goal || '',
+                conflict: parsed.conflict || '',
+                resolution: parsed.resolution || '',
+                settingNotes: parsed.settingNotes || '',
+                openingLine: parsed.openingLine || '',
+            };
+
+            const result: SceneCardResult = { sceneCard, model, provider, cached: false };
+            setCache(cacheKey, result);
+            return result;
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider configured. Go to Settings to add your API key.');
+}
+
+// ─── Narrative Sequence Builder (Advanced Feature 2) ────────
+export interface NarrativeStep {
+    entityId: string;
+    entityName: string;
+    chapterNumber: number;
+    reasoning: string;
+}
+
+export interface NarrativeSequenceResult {
+    steps: NarrativeStep[];
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export interface BuildSequenceRequest {
+    events: Array<{ id: string; name: string; description: string }>;
+    relationships: Array<{ fromName: string; toName: string; type: string }>;
+    projectName: string;
+}
+
+function buildSequencePrompt(req: BuildSequenceRequest): string {
+    let prompt = `You are a narrative structure expert for a storytelling tool called Chronos.
+
+## Task
+Analyze the following events and their relationships to determine the optimal **reading order** (chapter sequence). Consider causality, temporal order, and dramatic pacing.
+
+## Project: ${req.projectName}
+
+## Events
+`;
+    req.events.forEach(e => {
+        prompt += `- **${e.name}** (id: ${e.id}): ${e.description || '(no description)'}\n`;
+    });
+
+    if (req.relationships.length > 0) {
+        prompt += `\n## Relationships Between Events\n`;
+        req.relationships.forEach(r => {
+            prompt += `- ${r.fromName} —[${r.type}]→ ${r.toName}\n`;
+        });
+    }
+
+    prompt += `
+## Instructions
+Order these events into chapters. Consider:
+1. Causal chains (what must happen before what)
+2. Temporal relationships (happens_before, happens_after)
+3. Dramatic structure (hook, rising action, climax, resolution)
+4. Parallel storylines (interleave for tension)
+
+Respond ONLY with valid JSON:
+{
+  "steps": [
+    { "entityId": "id-here", "entityName": "Event Name", "chapterNumber": 1, "reasoning": "Why this comes first..." }
+  ]
+}
+
+Order ALL events. If two events could work in either order, use dramatic pacing to decide.`;
+    return prompt;
+}
+
+export async function buildNarrativeSequence(
+    req: BuildSequenceRequest,
+    settings?: AISettings
+): Promise<NarrativeSequenceResult> {
+    const aiSettings = settings || loadAISettings();
+
+    const eventSig = req.events.map(e => e.name).sort().join(',').slice(0, 100);
+    const cacheKey = `sequence:${req.projectName}:${eventSig}`;
+    const cached = getCached<NarrativeSequenceResult>(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    if (req.events.length === 0) {
+        return { steps: [], model: '', provider: aiSettings.defaultProvider, cached: false };
+    }
+
+    const prompt = buildSequencePrompt(req);
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    const allProviders: AIProvider[] = ['openai', 'anthropic', 'google'];
+    for (const p of allProviders) {
+        if (!providers.includes(p)) providers.push(p);
+    }
+
+    let lastError: Error | null = null;
+    for (const provider of providers) {
+        const apiKey = aiSettings.apiKeys[provider];
+        if (!apiKey) continue;
+        const model = provider === aiSettings.defaultProvider
+            ? aiSettings.defaultModel
+            : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const raw = await callProviderForAnalysis(provider, model, prompt, apiKey);
+            let jsonStr = raw;
+            const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            const parsed = JSON.parse(jsonStr.trim());
+
+            const steps: NarrativeStep[] = (parsed.steps || []).map(
+                (step: { entityId?: string; entityName?: string; chapterNumber?: number; reasoning?: string }) => ({
+                    entityId: step.entityId || '',
+                    entityName: step.entityName || '',
+                    chapterNumber: step.chapterNumber || 0,
+                    reasoning: step.reasoning || '',
+                })
+            );
+
+            const result: NarrativeSequenceResult = { steps, model, provider, cached: false };
+            setCache(cacheKey, result);
+            return result;
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider configured. Go to Settings to add your API key.');
+}
+
+// ─── Missing Scene Detector (Advanced Feature 3) ────────────
+export interface MissingScene {
+    id: string;
+    title: string;
+    description: string;
+    afterEvent: string;
+    beforeEvent: string;
+    reason: string;
+}
+
+export interface MissingSceneResult {
+    scenes: MissingScene[];
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export interface DetectGapsRequest {
+    events: Array<{ name: string; description: string }>;
+    characters: Array<{ name: string; description: string }>;
+    locations: Array<{ name: string; description: string }>;
+    relationships: Array<{ fromName: string; toName: string; type: string }>;
+    projectName: string;
+}
+
+function buildGapDetectionPrompt(req: DetectGapsRequest): string {
+    let prompt = `You are a narrative gap analyst for a storytelling tool called Chronos.
+
+## Task
+Analyze the following events and identify **missing transition scenes, unexplained jumps, or narrative gaps**. Look for moments where the reader would ask "wait, how did we get here?"
+
+## Project: ${req.projectName}
+
+## Events
+`;
+    req.events.forEach(e => {
+        prompt += `- **${e.name}**: ${e.description || '(no description)'}\n`;
+    });
+
+    if (req.characters.length > 0) {
+        prompt += `\n## Characters\n`;
+        req.characters.forEach(c => {
+            prompt += `- **${c.name}**: ${c.description}\n`;
+        });
+    }
+    if (req.locations.length > 0) {
+        prompt += `\n## Locations\n`;
+        req.locations.forEach(l => {
+            prompt += `- **${l.name}**: ${l.description}\n`;
+        });
+    }
+    if (req.relationships.length > 0) {
+        prompt += `\n## Relationships\n`;
+        req.relationships.forEach(r => {
+            prompt += `- ${r.fromName} —[${r.type}]→ ${r.toName}\n`;
+        });
+    }
+
+    prompt += `
+## Analysis Instructions
+Look for these types of gaps:
+1. **Transition gaps** — Character moves from Location A to Location B with no travel scene
+2. **Emotional jumps** — Character's emotional state changes drastically between events with no explanation
+3. **Causal gaps** — An effect happens but the cause event is missing
+4. **Introduction gaps** — Character appears in a scene without being introduced
+5. **Setup gaps** — A skill, item, or knowledge is used but was never established
+
+Respond ONLY with valid JSON:
+{
+  "scenes": [
+    {
+      "title": "Short title for the missing scene",
+      "description": "2-3 sentence description of what should happen",
+      "afterEvent": "Name of event this scene should come after",
+      "beforeEvent": "Name of event this scene should come before",
+      "reason": "Why this scene is needed"
+    }
+  ]
+}
+
+Return between 0 and 6 missing scenes. Only suggest genuinely needed scenes, not filler.
+If the narrative is complete with no gaps, return: { "scenes": [] }`;
+    return prompt;
+}
+
+export async function detectMissingScenes(
+    req: DetectGapsRequest,
+    settings?: AISettings
+): Promise<MissingSceneResult> {
+    const aiSettings = settings || loadAISettings();
+
+    const eventSig = req.events.map(e => e.name).sort().join(',').slice(0, 100);
+    const cacheKey = `gaps:${req.projectName}:${eventSig}`;
+    const cached = getCached<MissingSceneResult>(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    if (req.events.length === 0) {
+        return { scenes: [], model: '', provider: aiSettings.defaultProvider, cached: false };
+    }
+
+    const prompt = buildGapDetectionPrompt(req);
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    const allProviders: AIProvider[] = ['openai', 'anthropic', 'google'];
+    for (const p of allProviders) {
+        if (!providers.includes(p)) providers.push(p);
+    }
+
+    let lastError: Error | null = null;
+    for (const provider of providers) {
+        const apiKey = aiSettings.apiKeys[provider];
+        if (!apiKey) continue;
+        const model = provider === aiSettings.defaultProvider
+            ? aiSettings.defaultModel
+            : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const raw = await callProviderForAnalysis(provider, model, prompt, apiKey);
+            let jsonStr = raw;
+            const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            const parsed = JSON.parse(jsonStr.trim());
+
+            const scenes: MissingScene[] = (parsed.scenes || []).map(
+                (scene: { title?: string; description?: string; afterEvent?: string; beforeEvent?: string; reason?: string }, i: number) => ({
+                    id: `gap-${Date.now()}-${i}`,
+                    title: scene.title || 'Missing Scene',
+                    description: scene.description || '',
+                    afterEvent: scene.afterEvent || '',
+                    beforeEvent: scene.beforeEvent || '',
+                    reason: scene.reason || '',
+                })
+            );
+
+            const result: MissingSceneResult = { scenes, model, provider, cached: false };
+            setCache(cacheKey, result);
+            return result;
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider configured. Go to Settings to add your API key.');
+}
+
+// ─── Character Voice Samples (Wave 2 Feature 1) ────────────
+export interface VoiceSample {
+    line: string;
+    context: string; // e.g. "when angry", "being sarcastic"
+}
+
+export interface VoiceSampleResult {
+    samples: VoiceSample[];
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export interface GenerateVoiceRequest {
+    characterName: string;
+    characterDescription: string;
+    connectedThemes: Array<{ name: string; description: string }>;
+    connectedArcs: Array<{ name: string; description: string }>;
+    projectContext?: string;
+}
+
+function buildVoicePrompt(req: GenerateVoiceRequest): string {
+    let prompt = `You are a dialogue expert for a narrative tool called Chronos.
+
+## Task
+Write 3 distinctive dialogue samples for this character. Each line should reveal personality, speech patterns, and emotional depth. Make them feel like lines from a finished novel.
+
+## Character
+- **Name:** ${req.characterName}
+- **Description:** ${req.characterDescription}
+`;
+
+    if (req.connectedThemes.length > 0) {
+        prompt += `\n## Character Themes\n`;
+        req.connectedThemes.forEach(t => {
+            prompt += `- **${t.name}**: ${t.description}\n`;
+        });
+    }
+    if (req.connectedArcs.length > 0) {
+        prompt += `\n## Character Arcs\n`;
+        req.connectedArcs.forEach(a => {
+            prompt += `- **${a.name}**: ${a.description}\n`;
+        });
+    }
+    if (req.projectContext) {
+        prompt += `\n## Story Context\n${req.projectContext}\n`;
+    }
+
+    prompt += `
+## Instructions
+Generate exactly 3 dialogue lines. Each should:
+1. Sound distinct to THIS character (not generic)
+2. Show a DIFFERENT emotion or mood
+3. Include a brief context note (when/why they'd say this)
+
+Respond ONLY with valid JSON:
+{
+  "samples": [
+    { "line": "The exact dialogue line in quotes", "context": "Brief context: when angry at a friend" },
+    { "line": "Another distinctive line", "context": "Being playful or sarcastic" },
+    { "line": "A third line showing depth", "context": "A vulnerable or quiet moment" }
+  ]
+}`;
+    return prompt;
+}
+
+export async function generateCharacterVoice(
+    req: GenerateVoiceRequest,
+    settings?: AISettings
+): Promise<VoiceSampleResult> {
+    const aiSettings = settings || loadAISettings();
+
+    const cacheKey = `voice:${req.characterName}:${req.characterDescription.slice(0, 50)}`;
+    const cached = getCached<VoiceSampleResult>(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    const prompt = buildVoicePrompt(req);
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    const allProviders: AIProvider[] = ['openai', 'anthropic', 'google'];
+    for (const p of allProviders) {
+        if (!providers.includes(p)) providers.push(p);
+    }
+
+    let lastError: Error | null = null;
+    for (const provider of providers) {
+        const apiKey = aiSettings.apiKeys[provider];
+        if (!apiKey) continue;
+        const model = provider === aiSettings.defaultProvider
+            ? aiSettings.defaultModel
+            : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const raw = await callProvider(provider, model, prompt, apiKey);
+            let jsonStr = raw;
+            const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            const parsed = JSON.parse(jsonStr.trim());
+
+            const samples: VoiceSample[] = (parsed.samples || []).map(
+                (s: { line?: string; context?: string }) => ({
+                    line: s.line || '',
+                    context: s.context || '',
+                })
+            );
+
+            const result: VoiceSampleResult = { samples, model, provider, cached: false };
+            setCache(cacheKey, result);
+            return result;
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider configured. Go to Settings to add your API key.');
+}
+
+// ─── Worldbuilding Wiki Export (Wave 2 Feature 2) ───────────
+// No AI call needed — pure data formatting
+export interface WikiExportRequest {
+    projectName: string;
+    entities: Array<{ name: string; entity_type: string; description: string; properties: Record<string, unknown> }>;
+    relationships: Array<{ fromName: string; toName: string; type: string; label?: string }>;
+}
+
+export function generateWikiMarkdown(req: WikiExportRequest): string {
+    const groups: Record<string, typeof req.entities> = {};
+    const typeOrder = ['character', 'location', 'timeline', 'event', 'arc', 'theme', 'note'];
+
+    for (const entity of req.entities) {
+        const type = entity.entity_type;
+        if (!groups[type]) groups[type] = [];
+        groups[type].push(entity);
+    }
+
+    // Build relationship lookup
+    const relMap = new Map<string, Array<{ target: string; type: string; label?: string }>>();
+    for (const r of req.relationships) {
+        if (!relMap.has(r.fromName)) relMap.set(r.fromName, []);
+        relMap.get(r.fromName)!.push({ target: r.toName, type: r.type, label: r.label });
+        if (!relMap.has(r.toName)) relMap.set(r.toName, []);
+        relMap.get(r.toName)!.push({ target: r.fromName, type: r.type, label: r.label });
+    }
+
+    const typeLabels: Record<string, string> = {
+        character: 'Characters', location: 'Locations', timeline: 'Timelines',
+        event: 'Events', arc: 'Story Arcs', theme: 'Themes', note: 'Notes',
+    };
+
+    let md = `# ${req.projectName} — Worldbuilding Wiki\n\n`;
+    md += `*Auto-generated by Chronos on ${new Date().toLocaleDateString()}*\n\n`;
+    md += `---\n\n`;
+
+    for (const type of typeOrder) {
+        const entities = groups[type];
+        if (!entities || entities.length === 0) continue;
+
+        md += `## ${typeLabels[type] || type}\n\n`;
+        for (const entity of entities.sort((a, b) => a.name.localeCompare(b.name))) {
+            md += `### ${entity.name}\n\n`;
+            if (entity.description) {
+                md += `${entity.description}\n\n`;
+            } else {
+                md += `*No description*\n\n`;
+            }
+
+            const rels = relMap.get(entity.name);
+            if (rels && rels.length > 0) {
+                md += `**Connections:**\n`;
+                for (const r of rels) {
+                    md += `- ${r.type}${r.label ? ` (${r.label})` : ''} → ${r.target}\n`;
+                }
+                md += `\n`;
+            }
+
+            // Include scene card if present
+            const sc = entity.properties?.scene_card as Record<string, string> | undefined;
+            if (sc && type === 'event') {
+                md += `**Scene Card:**\n`;
+                if (sc.pov) md += `- POV: ${sc.pov}\n`;
+                if (sc.goal) md += `- Goal: ${sc.goal}\n`;
+                if (sc.conflict) md += `- Conflict: ${sc.conflict}\n`;
+                if (sc.openingLine) md += `- Opening: *"${sc.openingLine}"*\n`;
+                md += `\n`;
+            }
+        }
+        md += `---\n\n`;
+    }
+
+    return md;
+}
+
+// ─── POV Balance Analysis (Feature 8) ───────────────────────
+
+export interface POVAnalysisRequest {
+    events: Array<{
+        name: string;
+        povCharacter?: string;
+        emotionLevel?: number;
+    }>;
+    characters: Array<{ name: string; description: string }>;
+    projectContext?: string;
+}
+
+export interface POVIssue {
+    id: string;
+    type: 'missing_pov' | 'imbalance' | 'head_hopping' | 'suggestion';
+    severity: 'warning' | 'info' | 'error';
+    title: string;
+    description: string;
+    eventName?: string;
+}
+
+export interface POVAnalysisResult {
+    issues: POVIssue[];
+    distribution: Record<string, number>;
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export async function analyzePOVBalance(
+    req: POVAnalysisRequest,
+    settings?: AISettings
+): Promise<POVAnalysisResult> {
+    const aiSettings = settings || loadAISettings();
+
+    // Build distribution from data
+    const distribution: Record<string, number> = {};
+    const missingPOV: string[] = [];
+    const povSequence: string[] = [];
+
+    for (const ev of req.events) {
+        if (!ev.povCharacter) {
+            missingPOV.push(ev.name);
+        } else {
+            distribution[ev.povCharacter] = (distribution[ev.povCharacter] || 0) + 1;
+            povSequence.push(ev.povCharacter);
+        }
+    }
+
+    // Detect head-hopping (POV changes within 2 consecutive scenes)
+    const headHops: Array<{ from: string; to: string; index: number }> = [];
+    for (let i = 1; i < povSequence.length; i++) {
+        if (povSequence[i] !== povSequence[i - 1] && i + 1 < povSequence.length && povSequence[i + 1] !== povSequence[i]) {
+            headHops.push({ from: povSequence[i - 1], to: povSequence[i], index: i });
+        }
+    }
+
+    const issues: POVIssue[] = [];
+
+    // Flag missing POVs
+    for (const name of missingPOV) {
+        issues.push({
+            id: `pov-missing-${Date.now()}-${name}`,
+            type: 'missing_pov',
+            severity: 'error',
+            title: `No POV character assigned`,
+            description: `"${name}" has no POV character. Assign one for consistent narration.`,
+            eventName: name,
+        });
+    }
+
+    // Flag imbalance
+    const total = Object.values(distribution).reduce((a, b) => a + b, 0);
+    for (const [char, count] of Object.entries(distribution)) {
+        if (total > 3 && count / total > 0.7) {
+            issues.push({
+                id: `pov-imbalance-${Date.now()}-${char}`,
+                type: 'imbalance',
+                severity: 'warning',
+                title: `POV imbalance: ${char}`,
+                description: `${char} has ${count}/${total} scenes (${Math.round(count / total * 100)}%). Consider more variety.`,
+            });
+        }
+    }
+
+    // Flag head-hopping
+    for (const hop of headHops.slice(0, 3)) {
+        issues.push({
+            id: `pov-hop-${Date.now()}-${hop.index}`,
+            type: 'head_hopping',
+            severity: 'info',
+            title: `Rapid POV switch`,
+            description: `POV jumps ${hop.from} → ${hop.to} for only one scene. Consider grouping POV sections.`,
+        });
+    }
+
+    // AI-powered deeper analysis if we have enough data
+    if (req.events.length >= 3 && hasConfiguredProvider(aiSettings)) {
+        try {
+            const prompt = `You are a narrative structure analyst. Analyze this POV distribution for a novel:
+
+EVENTS & POV:
+${req.events.map(e => `- "${e.name}" — POV: ${e.povCharacter || 'UNASSIGNED'}${e.emotionLevel ? `, emotion: ${e.emotionLevel}` : ''}`).join('\n')}
+
+CHARACTERS: ${req.characters.map(c => c.name).join(', ')}
+
+Return JSON: {"suggestions":[{"title":"...","description":"..."}]}
+Rules: Max 3 suggestions. Focus on: POV rhythm, emotional variety per POV, underused characters. Be specific and actionable. No generic advice.`;
+
+            const providers: AIProvider[] = [aiSettings.defaultProvider];
+            for (const p of (['openai', 'anthropic', 'google'] as AIProvider[])) {
+                if (!providers.includes(p)) providers.push(p);
+            }
+
+            for (const provider of providers) {
+                const apiKey = aiSettings.apiKeys[provider];
+                if (!apiKey) continue;
+                const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+                if (!model) continue;
+
+                try {
+                    const raw = await callProvider(provider, model, prompt, apiKey);
+                    let jsonStr = raw;
+                    const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+                    if (jsonMatch) jsonStr = jsonMatch[1];
+                    const parsed = JSON.parse(jsonStr.trim());
+                    for (const s of (parsed.suggestions || [])) {
+                        issues.push({
+                            id: `pov-ai-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                            type: 'suggestion',
+                            severity: 'info',
+                            title: s.title,
+                            description: s.description,
+                        });
+                    }
+                    return { issues, distribution, model, provider, cached: false };
+                } catch { continue; }
+            }
+        } catch { /* fall through to local-only results */ }
+    }
+
+    return { issues, distribution, model: 'local', provider: 'openai', cached: false };
+}
+
+// ─── Chapter Assembler (Feature 5) ──────────────────────────
+
+export interface ChapterAssemblyRequest {
+    chapterName: string;
+    chapterDescription: string;
+    events: Array<{
+        name: string;
+        description: string;
+        sceneCard?: { pov?: string; goal?: string; conflict?: string; outcome?: string; openingLine?: string };
+        emotionLevel?: number;
+        povCharacter?: string;
+        draftWordCount?: number;
+    }>;
+    characters: Array<{
+        name: string;
+        description: string;
+        voiceSamples?: Array<{ line: string; context: string }>;
+    }>;
+    relationships: Array<{ from: string; to: string; type: string; label?: string }>;
+    projectContext?: string;
+    previousChapterSummary?: string;
+    nextChapterHint?: string;
+}
+
+export interface ChapterBlueprint {
+    synopsis: string;
+    structure: Array<{ beat: string; scene: string; emotionalNote: string }>;
+    estimatedWordCount: number;
+    openingHook: string;
+    closingHook: string;
+    tensions: string[];
+    characterArcs: Array<{ character: string; arc: string }>;
+}
+
+export interface ChapterAssemblyResult {
+    blueprint: ChapterBlueprint;
+    model: string;
+    provider: AIProvider;
+    cached: boolean;
+}
+
+export async function assembleChapter(
+    req: ChapterAssemblyRequest,
+    settings?: AISettings
+): Promise<ChapterAssemblyResult> {
+    const aiSettings = settings || loadAISettings();
+
+    const cacheKey = `chapter:${req.chapterName}:${req.events.map(e => e.name).join(',')}`;
+    const cached = getCached<ChapterAssemblyResult>(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    // Build the all-inclusive, ultra-optimized prompt
+    const eventBlock = req.events.map((e, i) => {
+        let line = `${i + 1}. "${e.name}"`;
+        if (e.description) line += ` — ${e.description}`;
+        if (e.povCharacter) line += ` [POV: ${e.povCharacter}]`;
+        if (e.emotionLevel !== undefined) line += ` [Emotion: ${e.emotionLevel > 0 ? '+' : ''}${e.emotionLevel}]`;
+        if (e.sceneCard) {
+            const sc = e.sceneCard;
+            const parts = [];
+            if (sc.goal) parts.push(`Goal: ${sc.goal}`);
+            if (sc.conflict) parts.push(`Conflict: ${sc.conflict}`);
+            if (sc.outcome) parts.push(`Outcome: ${sc.outcome}`);
+            if (parts.length) line += `\n   Scene: ${parts.join(' | ')}`;
+            if (sc.openingLine) line += `\n   Opens: "${sc.openingLine}"`;
+        }
+        if (e.draftWordCount) line += ` [${e.draftWordCount}w drafted]`;
+        return line;
+    }).join('\n');
+
+    const charBlock = req.characters.map(c => {
+        let line = `• ${c.name}: ${c.description || 'No description'}`;
+        if (c.voiceSamples && c.voiceSamples.length > 0) {
+            line += `\n  Voice: "${c.voiceSamples[0].line}" (${c.voiceSamples[0].context})`;
+        }
+        return line;
+    }).join('\n');
+
+    const relBlock = req.relationships.length > 0
+        ? req.relationships.map(r => `• ${r.from} —[${r.type}${r.label ? `: ${r.label}` : ''}]→ ${r.to}`).join('\n')
+        : 'None specified';
+
+    const emotionArc = req.events
+        .filter(e => e.emotionLevel !== undefined)
+        .map(e => `${e.name}: ${e.emotionLevel! > 0 ? '+' : ''}${e.emotionLevel}`)
+        .join(' → ');
+
+    const prompt = `You are an expert novel architect. Assemble a chapter blueprint from this complete story data.
+
+CHAPTER: "${req.chapterName}"
+${req.chapterDescription ? `INTENT: ${req.chapterDescription}` : ''}
+${req.previousChapterSummary ? `PREVIOUS CHAPTER: ${req.previousChapterSummary}` : ''}
+${req.nextChapterHint ? `NEXT CHAPTER LEADS TO: ${req.nextChapterHint}` : ''}
+${req.projectContext ? `PROJECT: ${req.projectContext}` : ''}
+
+SCENES IN ORDER:
+${eventBlock}
+
+EMOTIONAL ARC: ${emotionArc || 'Not set'}
+
+CHARACTERS INVOLVED:
+${charBlock}
+
+RELATIONSHIPS:
+${relBlock}
+
+Return ONLY this JSON:
+{"synopsis":"2-3 sentence chapter summary","structure":[{"beat":"rising/falling/climax/resolution","scene":"event name","emotionalNote":"reader should feel X"}],"estimatedWordCount":N,"openingHook":"compelling first sentence","closingHook":"chapter-ending line that pulls reader forward","tensions":["unresolved tension 1","..."],"characterArcs":[{"character":"name","arc":"what changes for them this chapter"}]}
+
+RULES:
+- Match structure entries 1:1 with the scenes provided
+- estimatedWordCount = scenes × 2000 adjusted for complexity
+- openingHook must grab attention instantly
+- closingHook must create urgency to read next chapter
+- tensions = threads left dangling for future payoff
+- characterArcs only for characters who meaningfully change
+- Use the character voice samples to inform tone
+- Honor the emotional arc — don't flatten peaks or valleys`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    for (const p of (['openai', 'anthropic', 'google'] as AIProvider[])) {
+        if (!providers.includes(p)) providers.push(p);
+    }
+
+    let lastError: Error | null = null;
+
+    for (const provider of providers) {
+        const apiKey = aiSettings.apiKeys[provider];
+        if (!apiKey) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const raw = await callProvider(provider, model, prompt, apiKey);
+            let jsonStr = raw;
+            const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+
+            const blueprint = JSON.parse(jsonStr.trim()) as ChapterBlueprint;
+
+            const result: ChapterAssemblyResult = { blueprint, model, provider, cached: false };
+            setCache(cacheKey, result);
+            return result;
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+        }
+    }
+
+    throw new Error(lastError?.message || 'No AI provider configured.');
+}
+
+// ─── Temporal Gap Analysis (Feature 12) ─────────────────────
+
+export interface TemporalGap {
+    id: string;
+    fromEvent: string;
+    toEvent: string;
+    fromTimestamp: string;
+    toTimestamp: string;
+    gapLabel: string;
+    gapDays: number;
+    warning?: string;
+}
+
+export function analyzeTemporalGaps(
+    events: Array<{ name: string; timestamp?: string; description: string }>
+): TemporalGap[] {
+    // Filter events with timestamps and sort
+    const timed = events
+        .filter(e => e.timestamp)
+        .map(e => ({ ...e, date: new Date(e.timestamp!) }))
+        .filter(e => !isNaN(e.date.getTime()))
+        .sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    if (timed.length < 2) return [];
+
+    const gaps: TemporalGap[] = [];
+    for (let i = 1; i < timed.length; i++) {
+        const prev = timed[i - 1];
+        const curr = timed[i];
+        const diffMs = curr.date.getTime() - prev.date.getTime();
+        const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+        if (diffDays === 0) continue;
+
+        let label: string;
+        if (diffDays < 0) {
+            label = `${Math.abs(diffDays)} days earlier`;
+        } else if (diffDays === 1) {
+            label = 'Next day';
+        } else if (diffDays < 7) {
+            label = `${diffDays} days later`;
+        } else if (diffDays < 30) {
+            const weeks = Math.round(diffDays / 7);
+            label = `${weeks} week${weeks > 1 ? 's' : ''} later`;
+        } else if (diffDays < 365) {
+            const months = Math.round(diffDays / 30);
+            label = `${months} month${months > 1 ? 's' : ''} later`;
+        } else {
+            const years = Math.round(diffDays / 365);
+            label = `${years} year${years > 1 ? 's' : ''} later`;
+        }
+
+        const warning = diffDays > 365 ? `Large time jump (${label}) — consider explaining what changed` : undefined;
+
+        gaps.push({
+            id: `gap-${i}`,
+            fromEvent: prev.name,
+            toEvent: curr.name,
+            fromTimestamp: prev.timestamp!,
+            toTimestamp: curr.timestamp!,
+            gapLabel: label,
+            gapDays: diffDays,
+            warning,
+        });
+    }
+
+    return gaps;
+}
