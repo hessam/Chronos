@@ -84,25 +84,25 @@ export const api = {
     // ─── Entities ─────────────────────────────────────────────
     async getEntities(
         projectId: string,
-        opts?: { type?: string; search?: string; limit?: number }
+        opts?: { type?: string; search?: string }
     ): Promise<{ entities: Entity[] }> {
         let query = supabase
             .from('entities')
             .select('*')
-            .eq('project_id', projectId)
-            .order('created_at', { ascending: false });
+            .eq('project_id', projectId);
 
         if (opts?.type && opts.type !== 'all') {
             query = query.eq('entity_type', opts.type);
         }
         if (opts?.search) {
-            query = query.ilike('name', `%${opts.search}%`);
-        }
-        if (opts?.limit) {
-            query = query.limit(opts.limit);
+            const term = `%${opts.search}%`;
+            query = query.or(`name.ilike.${term},description.ilike.${term}`);
         }
 
-        const { data, error } = await query;
+        const { data, error } = await query
+            .order('sort_order', { ascending: true, nullsFirst: false }) // Primary sort: user defined (nulls go last)
+            .order('created_at', { ascending: true }); // Secondary sort: oldest first for stable order
+
         if (error) throw new Error(error.message);
         return { entities: (data || []) as Entity[] };
     },
@@ -111,9 +111,19 @@ export const api = {
         projectId: string,
         body: { entity_type: string; name: string; description: string; properties: Record<string, unknown> }
     ): Promise<{ entity: Entity }> {
+        // Get the next sort_order for this project
+        const { data: maxData } = await supabase
+            .from('entities')
+            .select('sort_order')
+            .eq('project_id', projectId)
+            .order('sort_order', { ascending: false, nullsFirst: false })
+            .limit(1)
+            .single();
+        const nextOrder = ((maxData?.sort_order as number | null) ?? -1) + 1;
+
         const { data, error } = await supabase
             .from('entities')
-            .insert({ ...body, project_id: projectId })
+            .insert({ ...body, project_id: projectId, sort_order: nextOrder })
             .select()
             .single();
         if (error) throw new Error(error.message);
@@ -122,7 +132,7 @@ export const api = {
 
     async updateEntity(
         id: string,
-        body: Partial<{ name: string; description: string; properties: Record<string, unknown>; position_x: number; position_y: number; color: string | null; entity_type: string }>
+        body: Partial<{ name: string; description: string; properties: Record<string, unknown>; position_x: number; position_y: number; color: string | null; entity_type: string; sort_order: number }>
     ): Promise<{ entity: Entity }> {
         const { data, error } = await supabase
             .from('entities')
@@ -132,6 +142,17 @@ export const api = {
             .single();
         if (error) throw new Error(error.message);
         return { entity: data as Entity };
+    },
+
+    async reorderEntities(
+        updates: { id: string; sort_order: number }[]
+    ): Promise<void> {
+        const { error } = await supabase.rpc('reorder_entities', { updates });
+
+        if (error) {
+            console.error('Supabase RPC Error:', error);
+            throw new Error(error.message);
+        }
     },
 
     async deleteEntity(id: string): Promise<void> {

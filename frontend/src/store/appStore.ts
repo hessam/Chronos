@@ -19,7 +19,8 @@ export interface Entity {
     properties: Record<string, unknown>;
     position_x: number;
     position_y: number;
-    color: string | null;
+    color?: string;
+    sort_order?: number;
     created_at: string;
     updated_at: string;
 }
@@ -47,6 +48,14 @@ export interface TimelineVariant {
     position_y: number | null;
     created_at: string;
     updated_at: string;
+}
+
+export interface Beat {
+    id: string;
+    type: 'action' | 'dialogue' | 'internal' | 'description' | 'emotion';
+    description: string;
+    prose?: string;
+    status: 'draft' | 'revised' | 'final';
 }
 
 // Resolve an entity with timeline-specific overrides

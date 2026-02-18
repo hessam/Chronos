@@ -1,15 +1,18 @@
-import { useEffect, useState, useRef, FormEvent, useCallback } from 'react';
+import { useEffect, useState, useRef, useMemo, FormEvent, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAppStore, resolveEntity } from '../store/appStore';
 import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
-import TimelineCanvas from '../components/TimelineCanvas';
+import CausalityGraph from '../components/CausalityGraph';
+import TimelineExplorer from '../components/TimelineExplorer';
 import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
 import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
 import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
+
+import { BeatSequencer } from '../components/BeatSequencer';
 
 const ENTITY_ICONS: Record<string, string> = {
     character: '👤',
@@ -66,10 +69,19 @@ export default function WorkspacePage() {
     const [newEntityProps, setNewEntityProps] = useState('');
 
     // AI State
-    const [aiIdeas, setAiIdeas] = useState<GeneratedIdea[]>([]);
+    const [aiIdeasCache, setAiIdeasCache] = useState<Record<string, GeneratedIdea[]>>({});
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState<string | null>(null);
     const [aiResult, setAiResult] = useState<GenerateIdeasResult | null>(null);
+
+    // Derived AI ideas for current entity
+    const aiIdeas = (selectedEntity && aiIdeasCache[selectedEntity.id]) || [];
+
+    // Reset AI error/result when switching entities (but keep ideas in cache)
+    useEffect(() => {
+        setAiResult(null);
+        setAiError(null);
+    }, [selectedEntity?.id]);
 
     // Entity editing
     const [editingField, setEditingField] = useState<string | null>(null);
@@ -78,13 +90,53 @@ export default function WorkspacePage() {
 
     // Timeline visibility toggles
     const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
-    const [viewMode, setViewMode] = useState<'type' | 'timeline'>('type');
+    const [viewMode, setViewMode] = useState<'graph' | 'timeline'>('graph');
+    // Drag-and-drop reorder state (events only)
+    const [draggedEntityId, setDraggedEntityId] = useState<string | null>(null);
+    const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
     // Variant editing state
-    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants' | 'relationships'>('details');
+    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants' | 'relationships' | 'beats'>('details');
     const [editingVariantTimeline, setEditingVariantTimeline] = useState<string | null>(null);
     const [variantNameVal, setVariantNameVal] = useState('');
     const [variantDescVal, setVariantDescVal] = useState('');
 
+    // Handlers
+    const handleGenerateIdeas = async () => {
+        if (!selectedEntity) return;
+        setAiLoading(true);
+        setAiError(null);
+        try {
+            const allEntities = allEntitiesData?.entities || [];
+            // Get 1-hop linked entities for context
+            const linkedEntities = allEntities
+                .filter(e => e.id !== selectedEntity.id)
+                .slice(0, 5)
+                .map(e => ({ name: e.name, type: e.entity_type, description: e.description || '' }));
+
+            const request: GenerateIdeasRequest = {
+                entityName: selectedEntity.name,
+                entityType: selectedEntity.entity_type,
+                entityDescription: selectedEntity.description || '',
+                linkedEntities,
+                projectContext: currentProject?.description || '',
+                properties: selectedEntity.properties,
+            };
+
+            const result = await generateIdeas(request);
+            if (result.error) throw new Error(result.error);
+
+            setAiResult(result);
+            // Save to cache for this entity
+            setAiIdeasCache(prev => ({
+                ...prev,
+                [selectedEntity.id]: result.ideas
+            }));
+        } catch (err) {
+            setAiError(err instanceof Error ? err.message : 'Failed to generate ideas');
+        } finally {
+            setAiLoading(false);
+        }
+    };
     // Consistency checking state (E3-US4)
     const [consistencyReport, setConsistencyReport] = useState<ConsistencyReport | null>(null);
     const [isCheckingConsistency, setIsCheckingConsistency] = useState(false);
@@ -241,9 +293,21 @@ export default function WorkspacePage() {
     // Fetch entities (unfiltered for canvas — we filter in the sidebar)
     const { data: allEntitiesData } = useQuery({
         queryKey: ['entities', projectId, 'all'],
-        queryFn: () => api.getEntities(projectId!, { limit: 200 }),
+        queryFn: () => api.getEntities(projectId!),
         enabled: !!projectId,
     });
+
+    // Validated: Sync selectedEntity with fresh data from allEntitiesData to prevent stale state interactions
+    useEffect(() => {
+        if (selectedEntity && allEntitiesData?.entities) {
+            const freshEntity = allEntitiesData.entities.find(e => e.id === selectedEntity.id);
+            if (freshEntity && freshEntity.updated_at !== selectedEntity.updated_at) {
+                // Determine if properties changed deeply or just trust updated_at
+                // For safety, just update.
+                setSelectedEntity(freshEntity);
+            }
+        }
+    }, [allEntitiesData, selectedEntity, setSelectedEntity]);
 
     // Filtered for sidebar
     const entityQueryKey = ['entities', projectId, entityFilter, searchQuery];
@@ -252,7 +316,6 @@ export default function WorkspacePage() {
         queryFn: () => api.getEntities(projectId!, {
             type: entityFilter !== 'all' ? entityFilter : undefined,
             search: searchQuery || undefined,
-            limit: 100,
         }),
         enabled: !!projectId,
     });
@@ -296,8 +359,12 @@ export default function WorkspacePage() {
     const updateEntity = useMutation({
         mutationFn: ({ id, body }: { id: string; body: Parameters<typeof api.updateEntity>[1] }) =>
             api.updateEntity(id, body),
-        onSuccess: () => {
+        onSuccess: (result) => {
             queryClient.invalidateQueries({ queryKey: ['entities', projectId] });
+            // Keep selectedEntity state in sync so subsequent property mutations use fresh data
+            if (selectedEntity && result.entity && (result.entity as Entity).id === selectedEntity.id) {
+                setSelectedEntity(result.entity as Entity);
+            }
         },
     });
 
@@ -327,6 +394,47 @@ export default function WorkspacePage() {
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['variants'] });
         },
+    });
+
+    // Reorder entities
+    const reorderEntities = useMutation({
+        mutationFn: (updates: { id: string; sort_order: number }[]) => api.reorderEntities(updates),
+        onMutate: async (updates) => {
+            // Cancel any outgoing refetches (so they don't overwrite our optimistic update)
+            await queryClient.cancelQueries({ queryKey: ['entities', projectId] });
+
+            // Snapshot the previous value
+            const previousEntities = queryClient.getQueryData<any>(['entities', projectId, 'all']);
+
+            // Optimistically update to the new value
+            if (previousEntities?.entities) {
+                const newEntities = [...previousEntities.entities];
+                updates.forEach(update => {
+                    const entity = newEntities.find(e => e.id === update.id);
+                    if (entity) entity.sort_order = update.sort_order;
+                });
+                // Sort by new order
+                newEntities.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+                queryClient.setQueryData(['entities', projectId, 'all'], {
+                    ...previousEntities,
+                    entities: newEntities
+                });
+            }
+
+            return { previousEntities };
+        },
+        onSuccess: () => {
+            // Invalidate ALL entity queries to ensure consistency
+            queryClient.invalidateQueries({ queryKey: ['entities', projectId] });
+        },
+        onError: (err, _updates, context) => {
+            console.error('Reorder failed:', err);
+            // Rollback if failed
+            if (context?.previousEntities) {
+                queryClient.setQueryData(['entities', projectId, 'all'], context.previousEntities);
+            }
+        }
     });
 
     // Create relationship (Sprint 4)
@@ -453,37 +561,7 @@ export default function WorkspacePage() {
         });
     };
 
-    // AI idea generation (E3-US3)
-    const handleGenerateIdeas = async () => {
-        if (!selectedEntity) return;
-        setAiLoading(true);
-        setAiError(null);
-        setAiIdeas([]);
 
-        try {
-            const allEntities = allEntitiesData?.entities || [];
-            // Get 1-hop linked entities for context
-            const linkedEntities = allEntities
-                .filter(e => e.id !== selectedEntity.id)
-                .slice(0, 5)
-                .map(e => ({ name: e.name, type: e.entity_type, description: e.description }));
-
-            const result = await generateIdeas({
-                entityName: selectedEntity.name,
-                entityType: selectedEntity.entity_type,
-                entityDescription: selectedEntity.description,
-                linkedEntities,
-                projectContext: currentProject?.description,
-            });
-
-            setAiIdeas(result.ideas);
-            setAiResult(result);
-        } catch (err) {
-            setAiError(err instanceof Error ? err.message : 'Failed to generate ideas');
-        } finally {
-            setAiLoading(false);
-        }
-    };
 
     // Save AI idea as Note entity
     const saveIdeaAsNote = (idea: GeneratedIdea) => {
@@ -942,11 +1020,37 @@ export default function WorkspacePage() {
     };
 
     const allEntities = allEntitiesData?.entities || [];
-    const filteredEntities = entitiesData?.entities || [];
+    const rawFilteredEntities = entitiesData?.entities || [];
     const allVariants = variantsData?.variants || [];
     const entityVariants = entityVariantsData?.variants || [];
     const entityTypes = [...new Set(allEntities.map(e => e.entity_type))];
     const aiConfigured = hasConfiguredProvider();
+
+    // When a timeline is focused, filter sidebar to show related entities
+    const filteredEntities = useMemo(() => {
+        if (!focusedTimelineId) return rawFilteredEntities;
+
+        // Build set of entity IDs connected to this timeline via relationships
+        const connectedIds = new Set<string>();
+        for (const r of projectRelationships) {
+            if (r.from_entity_id === focusedTimelineId) connectedIds.add(r.to_entity_id);
+            if (r.to_entity_id === focusedTimelineId) connectedIds.add(r.from_entity_id);
+        }
+        // Also include entities with variants for this timeline
+        for (const v of allVariants) {
+            if (v.timeline_id === focusedTimelineId) connectedIds.add(v.entity_id);
+        }
+
+        return rawFilteredEntities.filter(e => {
+            // Always show the focused timeline itself
+            if (e.id === focusedTimelineId) return true;
+            // Show entities connected to this timeline
+            if (connectedIds.has(e.id)) return true;
+            // Show non-event entities (characters, locations, etc.) always
+            if (e.entity_type !== 'event' && e.entity_type !== 'timeline') return true;
+            return false;
+        });
+    }, [rawFilteredEntities, focusedTimelineId, projectRelationships, allVariants]);
 
     // Get list of timeline entities for focus dropdown and variant tab
     const timelines = allEntities.filter(e => e.entity_type === 'timeline');
@@ -1122,18 +1226,18 @@ export default function WorkspacePage() {
                             overflow: 'hidden',
                         }}>
                             <button
-                                onClick={() => setViewMode('type')}
+                                onClick={() => setViewMode('graph')}
                                 style={{
                                     flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
-                                    fontWeight: viewMode === 'type' ? 600 : 400,
-                                    background: viewMode === 'type' ? 'rgba(99,102,241,0.15)' : 'transparent',
-                                    color: viewMode === 'type' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                    fontWeight: viewMode === 'graph' ? 600 : 400,
+                                    background: viewMode === 'graph' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                    color: viewMode === 'graph' ? 'var(--accent)' : 'var(--text-tertiary)',
                                     border: 'none', cursor: 'pointer',
                                     borderRight: '1px solid var(--border)',
                                     transition: 'all 0.15s',
                                 }}
                             >
-                                📊 Type View
+                                🕸️ Causality Graph
                             </button>
                             <button
                                 onClick={() => setViewMode('timeline')}
@@ -1146,7 +1250,7 @@ export default function WorkspacePage() {
                                     transition: 'all 0.15s',
                                 }}
                             >
-                                🔀 Timeline View
+                                📐 Timeline Explorer
                             </button>
                         </div>
                     </div>
@@ -1234,14 +1338,106 @@ export default function WorkspacePage() {
                         </div>
                     ) : (
                         <div className="entity-list">
-                            {filteredEntities.map((entity) => {
+                            {filteredEntities.map((entity, index) => {
                                 const entityVariantTimelines = variantMap.get(entity.id) || [];
+                                const isEvent = entity.entity_type === 'event';
+                                const isDragged = draggedEntityId === entity.id;
+
                                 return (
                                     <div
                                         key={entity.id}
                                         className={`entity-item ${selectedEntity?.id === entity.id ? 'active' : ''}`}
                                         onClick={() => { setSelectedEntity(entity); setActiveDetailTab('details'); }}
+                                        draggable={isEvent && !focusedTimelineId}
+                                        onDragStart={isEvent ? (e) => {
+                                            setDraggedEntityId(entity.id);
+                                            e.dataTransfer.effectAllowed = 'move';
+                                            e.dataTransfer.setData('text/plain', entity.id);
+                                            // Make the drag image slightly transparent
+                                            if (e.currentTarget instanceof HTMLElement) {
+                                                e.currentTarget.style.opacity = '0.4';
+                                            }
+                                        } : undefined}
+                                        onDragEnd={isEvent ? (e) => {
+                                            if (e.currentTarget instanceof HTMLElement) {
+                                                e.currentTarget.style.opacity = '1';
+                                            }
+                                            // Perform the reorder
+                                            if (draggedEntityId && dropTargetIndex !== null && !reorderEntities.isPending) {
+                                                // CRITICAL: Always use the FULL list of events for reordering source
+                                                // to prevent sort_order gaps or overwrites when filters are active.
+                                                const allEvents = (allEntitiesData?.entities || []).filter(ev => ev.entity_type === 'event');
+
+                                                const dragIdx = allEvents.findIndex(ev => ev.id === draggedEntityId);
+                                                if (dragIdx !== -1) {
+                                                    const reordered = [...allEvents];
+                                                    const [moved] = reordered.splice(dragIdx, 1);
+
+                                                    // Calculate drop position in the full list
+                                                    // Since we drag in a filtered view, we need to map dropTargetIndex
+                                                    // from filteredEntities back to allEvents.
+                                                    const currentEvents = filteredEntities.filter(ev => ev.entity_type === 'event');
+                                                    let finalDropIdx;
+
+                                                    if (dropTargetIndex >= currentEvents.length) {
+                                                        // Dropped at the very end
+                                                        finalDropIdx = allEvents.length;
+                                                    } else {
+                                                        const targetEntity = currentEvents[dropTargetIndex];
+                                                        finalDropIdx = allEvents.findIndex(ev => ev.id === targetEntity.id);
+                                                    }
+
+                                                    if (finalDropIdx !== -1 && dragIdx !== finalDropIdx) {
+                                                        reordered.splice(finalDropIdx > dragIdx ? finalDropIdx - 1 : finalDropIdx, 0, moved);
+                                                        const updates = reordered.map((ev, idx) => ({ id: ev.id, sort_order: idx }));
+                                                        reorderEntities.mutate(updates);
+                                                    }
+                                                }
+                                            }
+                                            setDraggedEntityId(null);
+                                            setDropTargetIndex(null);
+                                        } : undefined}
+                                        onDragOver={isEvent ? (e) => {
+                                            e.preventDefault();
+                                            e.dataTransfer.dropEffect = 'move';
+                                            // Calculate which half of the item we're over
+                                            const events = filteredEntities.filter(ev => ev.entity_type === 'event');
+                                            const eventIndex = events.findIndex(ev => ev.id === entity.id);
+                                            const rect = e.currentTarget.getBoundingClientRect();
+                                            const midY = rect.top + rect.height / 2;
+                                            const targetIdx = e.clientY < midY ? eventIndex : eventIndex + 1;
+                                            setDropTargetIndex(targetIdx);
+                                        } : undefined}
+                                        onDragLeave={isEvent ? () => {
+                                            // Only clear if leaving the list area entirely
+                                        } : undefined}
+                                        onDrop={isEvent ? (e) => {
+                                            e.preventDefault();
+                                        } : undefined}
+                                        style={{
+                                            position: 'relative',
+                                            paddingRight: isEvent ? 36 : 12,
+                                            opacity: isDragged ? 0.4 : 1,
+                                            cursor: isEvent && !focusedTimelineId ? 'grab' : 'pointer',
+                                            transition: 'opacity 0.15s',
+                                        }}
                                     >
+                                        {/* Drop indicator line */}
+                                        {isEvent && dropTargetIndex !== null && draggedEntityId && draggedEntityId !== entity.id && (() => {
+                                            const events = filteredEntities.filter(ev => ev.entity_type === 'event');
+                                            const eventIndex = events.findIndex(ev => ev.id === entity.id);
+                                            if (dropTargetIndex === eventIndex) {
+                                                return (
+                                                    <div style={{
+                                                        position: 'absolute', top: -1, left: 4, right: 4,
+                                                        height: 2, background: '#6366f1', borderRadius: 1, zIndex: 10,
+                                                        boxShadow: '0 0 6px rgba(99,102,241,0.5)',
+                                                    }} />
+                                                );
+                                            }
+                                            return null;
+                                        })()}
+
                                         <div className="entity-icon">{ENTITY_ICONS[entity.entity_type]}</div>
                                         <div style={{ flex: 1, minWidth: 0 }}>
                                             <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1249,6 +1445,28 @@ export default function WorkspacePage() {
                                             </div>
                                             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>{entity.entity_type}</div>
                                         </div>
+
+                                        {/* Drag handle (Events only) */}
+                                        {isEvent && !focusedTimelineId && (
+                                            <div
+                                                className="drag-handle"
+                                                style={{
+                                                    position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                    width: 20, height: 28, cursor: 'grab',
+                                                    color: 'var(--text-tertiary)', fontSize: 14,
+                                                    opacity: 0.4, transition: 'opacity 0.15s',
+                                                    userSelect: 'none',
+                                                }}
+                                                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9'; }}
+                                                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.4'; }}
+                                                onClick={(e) => e.stopPropagation()}
+                                                title="Drag to reorder"
+                                            >
+                                                ⠿
+                                            </div>
+                                        )}
+
                                         {/* Variant indicator dots */}
                                         {entityVariantTimelines.length > 0 && (
                                             <div style={{ display: 'flex', gap: 2, alignItems: 'center' }} title={`Variants in ${entityVariantTimelines.length} timeline(s)`}>
@@ -1391,23 +1609,47 @@ export default function WorkspacePage() {
 
                 {!selectedEntity ? (
                     <div style={{ flex: 1, position: 'relative' }}>
-                        <TimelineCanvas
-                            entities={canvasEntities}
-                            relationships={projectRelationships}
-                            onEntitySelect={setSelectedEntity}
-                            selectedEntityId={null}
-                            onEntityPositionUpdate={handlePositionUpdate}
-                            hiddenTypes={hiddenTypes}
-                            viewMode={viewMode}
-                            focusedTimelineId={focusedTimelineId}
-                            variants={allVariants}
-                            timelines={timelines}
-                            onCreateRelationship={(fromId, toId) => {
-                                setRelFromId(fromId);
-                                setRelToId(toId);
-                                setShowCreateRelModal(true);
-                            }}
-                        />
+                        {viewMode === 'graph' ? (
+                            <CausalityGraph
+                                entities={canvasEntities}
+                                relationships={projectRelationships}
+                                timelines={timelines}
+                                variants={allVariants}
+                                onEntitySelect={setSelectedEntity}
+                                selectedEntityId={selectedEntity?.id || null}
+                                hiddenTypes={hiddenTypes}
+                                focusedTimelineId={focusedTimelineId}
+                                onEntityPositionUpdate={handlePositionUpdate}
+                                onCreateRelationship={(fromId, toId) => {
+                                    setRelFromId(fromId);
+                                    setRelToId(toId);
+                                    setShowCreateRelModal(true);
+                                }}
+                                onDeleteRelationship={(id) => deleteRelationship.mutate(id)}
+                            />
+                        ) : (
+                            <TimelineExplorer
+                                entities={canvasEntities}
+                                relationships={projectRelationships}
+                                timelines={timelines}
+                                variants={allVariants}
+                                focusedTimelineId={focusedTimelineId}
+                                onEntitySelect={setSelectedEntity}
+                                selectedEntityId={null}
+                                onReorderEntity={(entityId, newOrder) => {
+                                    if (reorderEntities.isPending) return;
+                                    // CRITICAL: Always use full list for consistent sort_order
+                                    const events = (allEntitiesData?.entities || []).filter(e => e.entity_type === 'event');
+                                    const reordered = events.filter(e => e.id !== entityId);
+                                    const moved = events.find(e => e.id === entityId);
+                                    if (moved) {
+                                        reordered.splice(newOrder, 0, moved);
+                                        const updates = reordered.map((e, idx) => ({ id: e.id, sort_order: idx }));
+                                        reorderEntities.mutate(updates);
+                                    }
+                                }}
+                            />
+                        )}
                         {/* Focus mode banner */}
                         {focusedTimelineId && (
                             <div style={{
@@ -1434,7 +1676,7 @@ export default function WorkspacePage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
                                 <button
                                     className="btn btn-ghost btn-sm"
-                                    onClick={() => { setSelectedEntity(null); setAiIdeas([]); setAiError(null); }}
+                                    onClick={() => { setSelectedEntity(null); setAiError(null); }}
                                     title="Back to canvas"
                                 >← Canvas</button>
                                 <span style={{ fontSize: 32 }}>{ENTITY_ICONS[selectedEntity.entity_type]}</span>
@@ -1500,6 +1742,20 @@ export default function WorkspacePage() {
                                     >
                                         📋 Details
                                     </button>
+                                    {selectedEntity.entity_type === 'event' && (
+                                        <button
+                                            onClick={() => setActiveDetailTab('beats')}
+                                            style={{
+                                                padding: '8px 16px', fontSize: 'var(--text-sm)', fontWeight: 500,
+                                                background: 'none', border: 'none', cursor: 'pointer',
+                                                color: activeDetailTab === 'beats' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                                borderBottom: activeDetailTab === 'beats' ? '2px solid var(--accent)' : '2px solid transparent',
+                                                marginBottom: -2, transition: 'all 0.15s',
+                                            }}
+                                        >
+                                            🎬 Beats
+                                        </button>
+                                    )}
                                     {timelines.length > 0 && (
                                         <button
                                             onClick={() => setActiveDetailTab('variants')}
@@ -1894,6 +2150,15 @@ export default function WorkspacePage() {
                             )}
 
                             {/* ─── Relationships Tab (Sprint 4) ─── */}
+                            {activeDetailTab === 'beats' && selectedEntity.entity_type === 'event' && (
+                                <div style={{ height: 'calc(100vh - 200px)' }}> {/* Constrain height for scrolling */}
+                                    <BeatSequencer
+                                        entity={selectedEntity}
+                                        projectDescription={currentProject?.description || ''}
+                                        onUpdate={(updates) => updateEntity.mutate({ id: selectedEntity.id, body: updates })}
+                                    />
+                                </div>
+                            )}
                             {activeDetailTab === 'relationships' && (
                                 <div>
                                     <div style={{

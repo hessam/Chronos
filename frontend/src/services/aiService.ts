@@ -124,6 +124,7 @@ export interface GenerateIdeasRequest {
     entityDescription: string;
     linkedEntities?: Array<{ name: string; type: string; description: string }>;
     projectContext?: string;
+    properties?: Record<string, unknown>;
 }
 
 export interface GeneratedIdea {
@@ -152,30 +153,40 @@ Given the following entity from the user's narrative, generate 5 creative and re
 - **Description:** ${req.entityDescription}
 `;
 
+
+
+    if (req.properties && req.properties.beats && Array.isArray(req.properties.beats) && req.properties.beats.length > 0) {
+        prompt += `\n## Scene Beats\n`;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        req.properties.beats.forEach((b: any, i: number) => {
+            prompt += `${i + 1}.[${b.type}] ${b.description} \n`;
+        });
+    }
+
     if (req.linkedEntities && req.linkedEntities.length > 0) {
         prompt += `\n## Related Entities\n`;
         req.linkedEntities.forEach(e => {
-            prompt += `- **${e.name}** (${e.type}): ${e.description}\n`;
+            prompt += `- ** ${e.name}** (${e.type}): ${e.description} \n`;
         });
     }
 
     if (req.projectContext) {
-        prompt += `\n## Project Context\n${req.projectContext}\n`;
+        prompt += `\n## Project Context\n${req.projectContext} \n`;
     }
 
     prompt += `
 ## Instructions
-Generate exactly 5 creative ideas. For each idea, provide:
-1. A short, catchy title (max 8 words)
-2. A 2-3 sentence description explaining the idea
-3. A confidence score from 0.0 to 1.0 indicating how well it fits the existing narrative
+Generate exactly 5 creative ideas.For each idea, provide:
+    1. A short, catchy title(max 8 words)
+    2. A 2 - 3 sentence description explaining the idea
+    3. A confidence score from 0.0 to 1.0 indicating how well it fits the existing narrative
 
 Respond ONLY with valid JSON in this exact format:
-{
-  "ideas": [
-    { "title": "...", "description": "...", "confidence": 0.85 }
-  ]
-}`;
+    {
+        "ideas": [
+            { "title": "...", "description": "...", "confidence": 0.85 }
+        ]
+    } `;
     return prompt;
 }
 
@@ -188,7 +199,7 @@ async function callProvider(
 ): Promise<string> {
     const circuit = getCircuit(provider);
     if (circuit.isOpen) {
-        throw new Error(`Circuit breaker open for ${provider}. Will retry in ${Math.ceil((CIRCUIT_RESET_MS - (Date.now() - circuit.lastFailure)) / 1000)}s.`);
+        throw new Error(`Circuit breaker open for ${provider}.Will retry in ${Math.ceil((CIRCUIT_RESET_MS - (Date.now() - circuit.lastFailure)) / 1000)} s.`);
     }
 
     try {
@@ -201,7 +212,7 @@ async function callProvider(
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`,
+                        'Authorization': `Bearer ${apiKey} `,
                     },
                     body: JSON.stringify({
                         model,
@@ -330,6 +341,133 @@ export async function generateIdeas(
         lastError?.message ||
         'No AI provider configured. Go to Settings to add your API key.'
     );
+}
+
+// ─── Beat Prose Generation (New Feature) ────────────────────
+
+export interface GenerateBeatProseRequest {
+    beat: {
+        description: string;
+        type: string;
+    };
+    context: {
+        entityName: string;
+        entityDescription: string;
+        previousProse?: string;
+        projectContext?: string;
+    };
+}
+
+export async function generateBeatProse(
+    req: GenerateBeatProseRequest,
+    settings?: AISettings
+): Promise<string> {
+    const aiSettings = settings || loadAISettings();
+    const prompt = `You are an AI co-author for a novel.
+    
+Context:
+Project: ${req.context.projectContext || 'Unknown Project'}
+Scene/Event: ${req.context.entityName} (${req.context.entityDescription})
+
+${req.context.previousProse ? `Previous Context:\n${req.context.previousProse}\n` : ''}
+
+Current Beat (${req.beat.type}): ${req.beat.description}
+
+Task: Write a single paragraph of high-quality narrative prose for this beat. 
+Style: Show, don't tell. Engaging and atmospheric.
+Output: Just the prose, nothing else.`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    let lastError: Error | null = null;
+
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider
+            ? aiSettings.defaultModel
+            : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        try {
+            const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
+            return text.trim();
+        } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider available');
+}
+
+
+
+export async function suggestBeats(
+    context: {
+        entityName: string;
+        entityDescription: string;
+        projectContext?: string;
+    },
+    settings?: AISettings
+): Promise<Array<{ type: string; description: string }>> {
+    const aiSettings = settings || loadAISettings();
+    const prompt = `You are an expert story outliner.
+    
+Context:
+Project: ${context.projectContext || 'Unknown'}
+Event: ${context.entityName}
+Description: ${context.entityDescription}
+
+Task: Break this event down into 5-8 distinct narrative beats (micro-events).
+Format: Return ONLY a JSON array of objects with "type" (action, dialogue, emotion, description, internal) and "description" fields.
+Example: [{"type": "action", "description": "Hero enters the room."}, {"type": "dialogue", "description": "Villain laughs."}]`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+
+        try {
+            const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
+            // Clean up markdown code blocks if present
+            const jsonStr = text.replace(/```json\n?|\n?```/g, '').trim();
+            return JSON.parse(jsonStr);
+        } catch (e) {
+            console.warn(`Provider ${provider} failed for suggestBeats`, e);
+        }
+    }
+    throw new Error('Failed to generate beats');
+}
+
+export async function checkBeatConsistency(
+    beats: Array<{ type: string; description: string }>,
+    context: { entityName: string; entityDescription: string },
+    settings?: AISettings
+): Promise<string> {
+    const aiSettings = settings || loadAISettings();
+    const beatsText = beats.map((b, i) => `${i + 1}. [${b.type}] ${b.description}`).join('\n');
+
+    const prompt = `Analyze the following sequence of beats for the event "${context.entityName}".
+    
+Event Description: ${context.entityDescription}
+
+Beats:
+${beatsText}
+
+Task: Check for logical consistency, pacing issues, and alignment with the event description.
+Output: A concise paragraph highlighting any issues or confirming the sequence is solid.`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+
+        try {
+            return await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
+        } catch (e) {
+            console.warn(`Provider ${provider} failed for checkBeatConsistency`, e);
+        }
+    }
+    throw new Error('Failed to check consistency');
 }
 
 // ─── Get available models for a provider ────────────────────
