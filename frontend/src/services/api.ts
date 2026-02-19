@@ -258,84 +258,93 @@ export const api = {
         if (error) throw new Error(error.message);
     },
 
-    // ─── Graph Traversal ──────────────────────────────────────
+    // ─── Graph Traversal (N-depth BFS) ──────────────────────────
     async getRelatedEntities(
         entityId: string,
         depth: number = 2,
-        projectId?: string
-    ): Promise<{ entities: Entity[]; paths: { from: string; to: string; type: string }[] }> {
-        // Get direct relationships (1-hop)
-        let fromQuery = supabase
+        projectId?: string,
+        opts?: { relationshipTypes?: string[]; entityTypes?: string[] }
+    ): Promise<{
+        entities: Entity[];
+        paths: { from: string; to: string; type: string; degree: number }[];
+        degrees: Map<string, number>;
+    }> {
+        type Edge = { from_entity_id: string; to_entity_id: string; relationship_type: string };
+
+        // Fetch ALL relationships for the project in one query (fast for moderate projects)
+        let query = supabase
             .from('relationships')
             .select('from_entity_id, to_entity_id, relationship_type');
-        let toQuery = supabase
-            .from('relationships')
-            .select('from_entity_id, to_entity_id, relationship_type');
+        if (projectId) query = query.eq('project_id', projectId);
+        const { data: allRels, error: relError } = await query;
+        if (relError) throw new Error(relError.message);
 
-        if (projectId) {
-            fromQuery = fromQuery.eq('project_id', projectId);
-            toQuery = toQuery.eq('project_id', projectId);
+        const edges = (allRels || []) as Edge[];
+
+        // Apply relationship type filter
+        const filteredEdges = opts?.relationshipTypes?.length
+            ? edges.filter(e => opts.relationshipTypes!.includes(e.relationship_type))
+            : edges;
+
+        // Build adjacency list (bidirectional)
+        const adj = new Map<string, { neighbor: string; edge: Edge }[]>();
+        for (const e of filteredEdges) {
+            if (!adj.has(e.from_entity_id)) adj.set(e.from_entity_id, []);
+            if (!adj.has(e.to_entity_id)) adj.set(e.to_entity_id, []);
+            adj.get(e.from_entity_id)!.push({ neighbor: e.to_entity_id, edge: e });
+            adj.get(e.to_entity_id)!.push({ neighbor: e.from_entity_id, edge: e });
         }
 
-        const [fromRes, toRes] = await Promise.all([
-            fromQuery.eq('from_entity_id', entityId),
-            toQuery.eq('to_entity_id', entityId),
-        ]);
+        // BFS from source entity
+        const visited = new Map<string, number>(); // entityId → degree
+        visited.set(entityId, 0);
+        const paths: { from: string; to: string; type: string; degree: number }[] = [];
+        const seenEdges = new Set<string>();
 
-        if (fromRes.error) throw new Error(fromRes.error.message);
-        if (toRes.error) throw new Error(toRes.error.message);
-
-        const paths: { from: string; to: string; type: string }[] = [];
-        const relatedIds = new Set<string>();
-
-        // Collect 1-hop connections
-        for (const r of (fromRes.data || [])) {
-            const rel = r as { from_entity_id: string; to_entity_id: string; relationship_type: string };
-            relatedIds.add(rel.to_entity_id);
-            paths.push({ from: rel.from_entity_id, to: rel.to_entity_id, type: rel.relationship_type });
-        }
-        for (const r of (toRes.data || [])) {
-            const rel = r as { from_entity_id: string; to_entity_id: string; relationship_type: string };
-            relatedIds.add(rel.from_entity_id);
-            paths.push({ from: rel.from_entity_id, to: rel.to_entity_id, type: rel.relationship_type });
-        }
-
-        // 2-hop: get relationships from 1-hop entities
-        if (depth >= 2 && relatedIds.size > 0) {
-            const hop2Ids = Array.from(relatedIds);
-            const [hop2From, hop2To] = await Promise.all([
-                supabase.from('relationships').select('from_entity_id, to_entity_id, relationship_type').in('from_entity_id', hop2Ids),
-                supabase.from('relationships').select('from_entity_id, to_entity_id, relationship_type').in('to_entity_id', hop2Ids),
-            ]);
-
-            for (const r of (hop2From.data || [])) {
-                const rel = r as { from_entity_id: string; to_entity_id: string; relationship_type: string };
-                if (rel.to_entity_id !== entityId) {
-                    relatedIds.add(rel.to_entity_id);
-                    paths.push({ from: rel.from_entity_id, to: rel.to_entity_id, type: rel.relationship_type });
+        let frontier = [entityId];
+        for (let d = 1; d <= Math.min(depth, 5); d++) {
+            const nextFrontier: string[] = [];
+            for (const nodeId of frontier) {
+                for (const { neighbor, edge } of (adj.get(nodeId) || [])) {
+                    // Track unique edges
+                    const edgeKey = `${edge.from_entity_id}→${edge.to_entity_id}→${edge.relationship_type}`;
+                    if (!seenEdges.has(edgeKey)) {
+                        seenEdges.add(edgeKey);
+                        paths.push({ from: edge.from_entity_id, to: edge.to_entity_id, type: edge.relationship_type, degree: d });
+                    }
+                    if (!visited.has(neighbor)) {
+                        visited.set(neighbor, d);
+                        nextFrontier.push(neighbor);
+                    }
                 }
             }
-            for (const r of (hop2To.data || [])) {
-                const rel = r as { from_entity_id: string; to_entity_id: string; relationship_type: string };
-                if (rel.from_entity_id !== entityId) {
-                    relatedIds.add(rel.from_entity_id);
-                    paths.push({ from: rel.from_entity_id, to: rel.to_entity_id, type: rel.relationship_type });
-                }
-            }
+            frontier = nextFrontier;
+            if (frontier.length === 0) break;
         }
 
-        // Fetch the actual entities
-        if (relatedIds.size === 0) {
-            return { entities: [], paths: [] };
+        // Remove source entity from results
+        visited.delete(entityId);
+
+        if (visited.size === 0) {
+            return { entities: [], paths: [], degrees: new Map() };
         }
 
+        // Fetch entities
         const { data: entityData, error: entityError } = await supabase
             .from('entities')
             .select('*')
-            .in('id', Array.from(relatedIds));
+            .in('id', Array.from(visited.keys()));
 
         if (entityError) throw new Error(entityError.message);
-        return { entities: (entityData || []) as Entity[], paths };
+
+        let resultEntities = (entityData || []) as Entity[];
+
+        // Apply entity type filter
+        if (opts?.entityTypes?.length) {
+            resultEntities = resultEntities.filter(e => opts.entityTypes!.includes(e.entity_type));
+        }
+
+        return { entities: resultEntities, paths, degrees: visited };
     },
 
     // ─── Full-Text Search (E6-US2) ────────────────────────────

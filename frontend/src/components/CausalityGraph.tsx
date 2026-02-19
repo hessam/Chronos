@@ -24,12 +24,59 @@ interface CausalityGraphProps {
     onCreateRelationship?: (fromId: string, toId: string) => void;
     onDeleteRelationship?: (id: string) => void;
     onEntityPositionUpdate?: (id: string, x: number, y: number) => void;
+    // Structural Editor props
+    onEntityCreate?: (type: string, name: string, x: number, y: number) => void;
+    onEntityDelete?: (id: string) => void;
+    onEntityRename?: (id: string, newName: string) => void;
+    onFindConnections?: (entityId: string) => void;
+    onCreateRelationshipWithType?: (fromId: string, toId: string, type: string) => void;
+    correlationHighlight?: Set<string> | null;
+    analyzerActive?: boolean;
+    onToggleAnalyzer?: () => void;
 }
 
 interface ContextMenu {
     x: number; y: number;
     nodeId: string; entity: Entity;
 }
+
+interface CanvasMenu {
+    x: number; y: number;
+    graphX: number; graphY: number;
+}
+
+interface InlineRename {
+    entityId: string;
+    currentName: string;
+    x: number; y: number;
+}
+
+interface QuickConnect {
+    fromId: string; toId: string;
+    x: number; y: number;
+}
+
+const QUICK_REL_TYPES = [
+    { value: 'causes', label: '⚡ Causes', color: '#f59e0b' },
+    { value: 'involves', label: '🤝 Involves', color: '#6366f1' },
+    { value: 'creates', label: '✨ Creates', color: '#10b981' },
+    { value: 'blocks', label: '🚫 Blocks', color: '#ef4444' },
+    { value: 'motivates', label: '💪 Motivates', color: '#8b5cf6' },
+    { value: 'references', label: '📎 References', color: '#64748b' },
+    { value: 'parent_of', label: '🌳 Parent Of', color: '#06b6d4' },
+    { value: 'located_at', label: '📍 Located At', color: '#ec4899' },
+    { value: 'branches_into', label: '🔀 Branches Into', color: '#f97316' },
+    { value: 'inspires', label: '💡 Inspires', color: '#eab308' },
+];
+
+const ENTITY_CREATE_TYPES = [
+    { type: 'event', icon: '⚡', label: 'Event' },
+    { type: 'character', icon: '👤', label: 'Character' },
+    { type: 'location', icon: '📍', label: 'Location' },
+    { type: 'arc', icon: '📐', label: 'Arc' },
+    { type: 'theme', icon: '💎', label: 'Theme' },
+    { type: 'note', icon: '📝', label: 'Note' },
+];
 
 const TYPE_ICONS: Record<string, string> = {
     character: '👤', event: '⚡', timeline: '🕐', arc: '📐',
@@ -48,14 +95,27 @@ export default function CausalityGraph({
     onCreateRelationship,
     onDeleteRelationship,
     onEntityPositionUpdate,
+    onEntityCreate,
+    onEntityDelete,
+    onEntityRename,
+    onFindConnections,
+    onCreateRelationshipWithType,
+    correlationHighlight = null,
+    analyzerActive = false,
+    onToggleAnalyzer,
 }: CausalityGraphProps) {
     const svgRef = useRef<SVGSVGElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
     const [relFilter, setRelFilter] = useState<Set<string> | null>(null);
     const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+    const [canvasMenu, setCanvasMenu] = useState<CanvasMenu | null>(null);
     const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
     const [highlightedCharacter, setHighlightedCharacter] = useState<string | null>(null);
+    const [inlineRename, setInlineRename] = useState<InlineRename | null>(null);
+    const [quickConnect, setQuickConnect] = useState<QuickConnect | null>(null);
+    const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+    const renameInputRef = useRef<HTMLInputElement>(null);
     const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
     const draggedPositions = useRef<Map<string, { x: number; y: number }>>(new Map());
 
@@ -265,6 +325,7 @@ export default function CausalityGraph({
         // Opacity based on state
         nodeEls.style('opacity', (d: GraphNode) => {
             if (isCharMode) return charPath.has(d.id) ? '1' : '0.08';
+            if (correlationHighlight && !correlationHighlight.has(d.id)) return '0.1';
             if (focusedEntityIds && !focusedEntityIds.has(d.id)) return '0.12';
             return '1';
         });
@@ -366,7 +427,18 @@ export default function CausalityGraph({
 
         function handleClick(d: GraphNode) {
             if (connectingFrom) {
-                if (connectingFrom !== d.id) onCreateRelationship?.(connectingFrom, d.id);
+                if (connectingFrom !== d.id) {
+                    // Show quick type chooser instead of directly creating
+                    if (onCreateRelationshipWithType) {
+                        // Get mouse position from the container's bounding rect + node position
+                        const rect = containerRef.current?.getBoundingClientRect();
+                        const midX = (rect?.left || 0) + dimensions.width / 2;
+                        const midY = (rect?.top || 0) + dimensions.height / 2;
+                        setQuickConnect({ fromId: connectingFrom, toId: d.id, x: midX, y: midY });
+                    } else {
+                        onCreateRelationship?.(connectingFrom, d.id);
+                    }
+                }
                 setConnectingFrom(null);
                 return;
             }
@@ -376,17 +448,36 @@ export default function CausalityGraph({
             onEntitySelect(d.entity);
         }
 
-        // Context menu
+        // Context menu on nodes
         nodeEls.on('contextmenu', (event, d) => {
             event.preventDefault(); event.stopPropagation();
+            setCanvasMenu(null);
             setContextMenu({ x: event.clientX, y: event.clientY, nodeId: d.id, entity: d.entity });
+        });
+
+        // Canvas right-click (background)
+        svg.on('contextmenu', (event: MouseEvent) => {
+            // Only if clicking empty space (not a node)
+            const target = event.target as SVGElement;
+            if (target.tagName === 'svg' || target.classList.contains('graph-root') || target.closest('.guides') || target.closest('.links')) {
+                event.preventDefault();
+                event.stopPropagation();
+                setContextMenu(null);
+                // Get graph coordinates from mouse position
+                const transform = d3.zoomTransform(svgRef.current!);
+                const gx = (event.offsetX - transform.x) / transform.k;
+                const gy = (event.offsetY - transform.y) / transform.k;
+                setCanvasMenu({ x: event.clientX, y: event.clientY, graphX: gx, graphY: gy });
+            }
         });
 
         // Clear on canvas click
         svg.on('click', () => {
             setContextMenu(null);
+            setCanvasMenu(null);
             setConnectingFrom(null);
             setHighlightedCharacter(null);
+            setQuickConnect(null);
         });
 
     }, [nodes, links, maxLayer, dimensions, contextZoneBounds, contextCount, drawLinks,
@@ -469,6 +560,15 @@ export default function CausalityGraph({
                     border: '1px solid #1e293b', background: '#0f172a',
                     color: '#94a3b8', cursor: 'pointer',
                 }}>⊞ Fit</button>
+                {onToggleAnalyzer && (
+                    <button onClick={onToggleAnalyzer} style={{
+                        padding: '2px 8px', fontSize: 9, borderRadius: 6,
+                        border: analyzerActive ? '1px solid #6366f1' : '1px solid #1e293b',
+                        background: analyzerActive ? 'rgba(99,102,241,0.15)' : '#0f172a',
+                        color: analyzerActive ? '#a5b4fc' : '#94a3b8',
+                        cursor: 'pointer',
+                    }}>🔍 Analyzer</button>
+                )}
             </div>
 
             {/* Focus + character trace indicators */}
@@ -521,16 +621,25 @@ export default function CausalityGraph({
 
             <svg ref={svgRef} width={dimensions.width} height={dimensions.height}
                 style={{ display: 'block' }}
-                onKeyDown={e => { if (e.key === 'Escape') { setConnectingFrom(null); setHighlightedCharacter(null); } }}
+                onKeyDown={e => {
+                    if (e.key === 'Escape') {
+                        setConnectingFrom(null);
+                        setHighlightedCharacter(null);
+                        setInlineRename(null);
+                        setQuickConnect(null);
+                        setCanvasMenu(null);
+                        setConfirmDelete(null);
+                    }
+                }}
                 tabIndex={0}
             />
 
-            {/* Context Menu */}
+            {/* ─── Node Context Menu (enhanced) ────────────────────── */}
             {contextMenu && (
                 <div style={{
                     position: 'fixed', left: contextMenu.x, top: contextMenu.y,
                     background: '#1e293b', border: '1px solid #334155',
-                    borderRadius: 8, padding: 3, minWidth: 150, zIndex: 100,
+                    borderRadius: 8, padding: 3, minWidth: 170, zIndex: 100,
                     boxShadow: '0 8px 28px rgba(0,0,0,0.5)',
                 }} onClick={() => setContextMenu(null)}>
                     <div style={{ padding: '5px 10px', color: '#475569', fontSize: 8, fontWeight: 600, textTransform: 'uppercase' }}>
@@ -542,11 +651,30 @@ export default function CausalityGraph({
                     <button onClick={() => { setConnectingFrom(contextMenu.nodeId); setContextMenu(null); }} style={menuStyle}>
                         🔗 Connect To…
                     </button>
-                    {contextMenu.entity.entity_type === 'character' && (
-                        <button onClick={() => { setHighlightedCharacter(contextMenu.nodeId); setContextMenu(null); }} style={menuStyle}>
-                            🔍 Trace
+                    {/* NEW: Inline Rename */}
+                    <button onClick={() => {
+                        setInlineRename({
+                            entityId: contextMenu.entity.id,
+                            currentName: contextMenu.entity.name,
+                            x: contextMenu.x,
+                            y: contextMenu.y,
+                        });
+                        setContextMenu(null);
+                    }} style={menuStyle}>
+                        ✏️ Rename
+                    </button>
+                    {/* NEW: Find Connections */}
+                    {onFindConnections && (
+                        <button onClick={() => { onFindConnections(contextMenu.entity.id); setContextMenu(null); }} style={menuStyle}>
+                            🔍 Find Connections
                         </button>
                     )}
+                    {contextMenu.entity.entity_type === 'character' && (
+                        <button onClick={() => { setHighlightedCharacter(contextMenu.nodeId); setContextMenu(null); }} style={menuStyle}>
+                            🛤️ Trace Path
+                        </button>
+                    )}
+                    {/* Relationship delete entries */}
                     {relationships
                         .filter(r => r.from_entity_id === contextMenu.nodeId || r.to_entity_id === contextMenu.nodeId)
                         .slice(0, 5)
@@ -562,6 +690,176 @@ export default function CausalityGraph({
                                 </button>
                             );
                         })}
+                    {/* HR + Delete Entity */}
+                    <div style={{ height: 1, background: '#334155', margin: '3px 0' }} />
+                    <button
+                        onClick={() => {
+                            setConfirmDelete({ id: contextMenu.entity.id, name: contextMenu.entity.name });
+                            setContextMenu(null);
+                        }}
+                        style={{ ...menuStyle, color: '#ef4444' }}
+                    >
+                        🗑️ Delete Entity
+                    </button>
+                </div>
+            )}
+
+            {/* ─── Canvas Background Menu ──────────────────────────── */}
+            {canvasMenu && onEntityCreate && (
+                <div style={{
+                    position: 'fixed', left: canvasMenu.x, top: canvasMenu.y,
+                    background: '#1e293b', border: '1px solid #334155',
+                    borderRadius: 8, padding: 3, minWidth: 160, zIndex: 100,
+                    boxShadow: '0 8px 28px rgba(0,0,0,0.5)',
+                }} onClick={() => setCanvasMenu(null)}>
+                    <div style={{ padding: '5px 10px', color: '#475569', fontSize: 8, fontWeight: 600, textTransform: 'uppercase' }}>
+                        Create at this position
+                    </div>
+                    {ENTITY_CREATE_TYPES.map(({ type, icon, label }) => (
+                        <button
+                            key={type}
+                            onClick={() => {
+                                const name = prompt(`Name for new ${label}:`)?.trim();
+                                if (name) {
+                                    onEntityCreate(type, name, canvasMenu.graphX, canvasMenu.graphY);
+                                }
+                                setCanvasMenu(null);
+                            }}
+                            style={menuStyle}
+                        >
+                            {icon} New {label}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* ─── Inline Rename Overlay ───────────────────────────── */}
+            {inlineRename && (
+                <div
+                    style={{
+                        position: 'fixed', left: inlineRename.x - 100, top: inlineRename.y - 20,
+                        zIndex: 200, display: 'flex', gap: 4, alignItems: 'center',
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <input
+                        ref={renameInputRef}
+                        autoFocus
+                        defaultValue={inlineRename.currentName}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                const val = (e.target as HTMLInputElement).value.trim();
+                                if (val && val !== inlineRename.currentName) {
+                                    onEntityRename?.(inlineRename.entityId, val);
+                                }
+                                setInlineRename(null);
+                            }
+                            if (e.key === 'Escape') setInlineRename(null);
+                        }}
+                        onBlur={(e) => {
+                            const val = e.target.value.trim();
+                            if (val && val !== inlineRename.currentName) {
+                                onEntityRename?.(inlineRename.entityId, val);
+                            }
+                            setInlineRename(null);
+                        }}
+                        style={{
+                            width: 200, padding: '6px 10px', borderRadius: 8,
+                            background: '#0f172a', border: '2px solid #6366f1',
+                            color: '#e2e8f0', fontSize: 13, fontWeight: 600, outline: 'none',
+                            boxShadow: '0 0 20px rgba(99,102,241,0.3)',
+                        }}
+                    />
+                    <span style={{ fontSize: 9, color: '#64748b' }}>↵ save · esc cancel</span>
+                </div>
+            )}
+
+            {/* ─── Quick Relationship Type Chooser ─────────────────── */}
+            {quickConnect && (
+                <div
+                    style={{
+                        position: 'fixed', left: quickConnect.x - 80, top: quickConnect.y - 10,
+                        background: '#1e293b', border: '1px solid #334155',
+                        borderRadius: 10, padding: 4, minWidth: 180, zIndex: 200,
+                        boxShadow: '0 12px 40px rgba(0,0,0,0.6)',
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div style={{ padding: '4px 10px', color: '#475569', fontSize: 8, fontWeight: 600, textTransform: 'uppercase' }}>
+                        Choose Relationship Type
+                    </div>
+                    {QUICK_REL_TYPES.map(({ value, label, color }) => (
+                        <button
+                            key={value}
+                            onClick={() => {
+                                onCreateRelationshipWithType?.(quickConnect.fromId, quickConnect.toId, value);
+                                setQuickConnect(null);
+                            }}
+                            style={{
+                                ...menuStyle,
+                                display: 'flex', alignItems: 'center', gap: 6,
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = color + '20')}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
+                        >
+                            <span style={{ fontSize: 12 }}>{label.split(' ')[0]}</span>
+                            <span>{label.split(' ').slice(1).join(' ')}</span>
+                        </button>
+                    ))}
+                    <div style={{ height: 1, background: '#334155', margin: '2px 0' }} />
+                    <button
+                        onClick={() => {
+                            onCreateRelationship?.(quickConnect.fromId, quickConnect.toId);
+                            setQuickConnect(null);
+                        }}
+                        style={{ ...menuStyle, color: '#64748b', fontSize: 9 }}
+                    >
+                        ⚙️ More options (full dialog)…
+                    </button>
+                </div>
+            )}
+
+            {/* ─── Delete Entity Confirmation ──────────────────────── */}
+            {confirmDelete && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 300,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)',
+                }} onClick={() => setConfirmDelete(null)}>
+                    <div style={{
+                        background: '#1e293b', border: '1px solid #334155',
+                        borderRadius: 12, padding: '20px 24px', maxWidth: 340,
+                        boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+                    }} onClick={(e) => e.stopPropagation()}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: '#e2e8f0', marginBottom: 8 }}>
+                            🗑️ Delete Entity
+                        </div>
+                        <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 16 }}>
+                            Are you sure you want to delete <strong style={{ color: '#f87171' }}>{confirmDelete.name}</strong>?
+                            This will also remove all its relationships.
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setConfirmDelete(null)}
+                                style={{
+                                    padding: '6px 14px', borderRadius: 6,
+                                    background: '#334155', border: 'none',
+                                    color: '#e2e8f0', cursor: 'pointer', fontSize: 11,
+                                }}
+                            >Cancel</button>
+                            <button
+                                onClick={() => {
+                                    onEntityDelete?.(confirmDelete.id);
+                                    setConfirmDelete(null);
+                                }}
+                                style={{
+                                    padding: '6px 14px', borderRadius: 6,
+                                    background: '#ef4444', border: 'none',
+                                    color: '#fff', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                                }}
+                            >Delete</button>
+                        </div>
+                    </div>
                 </div>
             )}
 

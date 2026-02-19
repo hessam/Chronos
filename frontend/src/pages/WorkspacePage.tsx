@@ -6,6 +6,7 @@ import { useAppStore, resolveEntity } from '../store/appStore';
 import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import CausalityGraph from '../components/CausalityGraph';
+import { CorrelationPanel } from '../components/CorrelationPanel';
 import TimelineExplorer from '../components/TimelineExplorer';
 import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
 import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
@@ -212,6 +213,11 @@ export default function WorkspacePage() {
     const [relToId, setRelToId] = useState<string | null>(null);
     const [relType, setRelType] = useState('involves');
     const [relLabel, setRelLabel] = useState('');
+
+    // Co-Relation Analyzer state
+    const [showAnalyzer, setShowAnalyzer] = useState(false);
+    const [correlationHighlight, setCorrelationHighlight] = useState<Set<string> | null>(null);
+    const [analyzerSourceId, setAnalyzerSourceId] = useState<string | null>(null);
 
     // Fetch project
     const { data: projectData } = useQuery({
@@ -1610,23 +1616,63 @@ export default function WorkspacePage() {
                 {!selectedEntity ? (
                     <div style={{ flex: 1, position: 'relative' }}>
                         {viewMode === 'graph' ? (
-                            <CausalityGraph
-                                entities={canvasEntities}
-                                relationships={projectRelationships}
-                                timelines={timelines}
-                                variants={allVariants}
-                                onEntitySelect={setSelectedEntity}
-                                selectedEntityId={selectedEntity?.id || null}
-                                hiddenTypes={hiddenTypes}
-                                focusedTimelineId={focusedTimelineId}
-                                onEntityPositionUpdate={handlePositionUpdate}
-                                onCreateRelationship={(fromId, toId) => {
-                                    setRelFromId(fromId);
-                                    setRelToId(toId);
-                                    setShowCreateRelModal(true);
-                                }}
-                                onDeleteRelationship={(id) => deleteRelationship.mutate(id)}
-                            />
+                            <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%' }}>
+                                <CausalityGraph
+                                    entities={canvasEntities}
+                                    relationships={projectRelationships}
+                                    timelines={timelines}
+                                    variants={allVariants}
+                                    onEntitySelect={setSelectedEntity}
+                                    selectedEntityId={null}
+                                    hiddenTypes={hiddenTypes}
+                                    focusedTimelineId={focusedTimelineId}
+                                    onEntityPositionUpdate={handlePositionUpdate}
+                                    onCreateRelationship={(fromId, toId) => {
+                                        setRelFromId(fromId);
+                                        setRelToId(toId);
+                                        setShowCreateRelModal(true);
+                                    }}
+                                    onDeleteRelationship={(id) => deleteRelationship.mutate(id)}
+                                    correlationHighlight={correlationHighlight}
+                                    analyzerActive={showAnalyzer}
+                                    onToggleAnalyzer={() => setShowAnalyzer(p => !p)}
+                                    onEntityCreate={(type, name, x, y) => {
+                                        createEntity.mutate({
+                                            entity_type: type,
+                                            name,
+                                            description: '',
+                                            properties: { position_x: x, position_y: y },
+                                        });
+                                    }}
+                                    onEntityDelete={(id) => {
+                                        deleteEntity.mutate(id);
+                                    }}
+                                    onEntityRename={(id, newName) => {
+                                        updateEntity.mutate({ id, body: { name: newName } });
+                                    }}
+                                    onFindConnections={(entityId) => {
+                                        setAnalyzerSourceId(entityId);
+                                        setShowAnalyzer(true);
+                                    }}
+                                    onCreateRelationshipWithType={(fromId, toId, type) => {
+                                        createRelationship.mutate({
+                                            from_entity_id: fromId,
+                                            to_entity_id: toId,
+                                            relationship_type: type,
+                                        });
+                                    }}
+                                />
+                                {showAnalyzer && projectId && (
+                                    <CorrelationPanel
+                                        entities={allEntities}
+                                        projectId={projectId}
+                                        onClose={() => { setShowAnalyzer(false); setCorrelationHighlight(null); }}
+                                        onHighlightChange={setCorrelationHighlight}
+                                        onEntitySelect={(entity) => setSelectedEntity(entity)}
+                                        initialSourceId={analyzerSourceId}
+                                    />
+                                )}
+                            </div>
                         ) : (
                             <TimelineExplorer
                                 entities={canvasEntities}
