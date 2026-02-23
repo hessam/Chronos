@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { Entity, Relationship, TimelineVariant } from '../store/appStore';
+import { CAUSAL_TYPES } from '../constants/relationships';
 
 /* ================================================================
    Causality DAG Engine — with context zone separation
@@ -48,10 +49,7 @@ const TIMELINE_COLORS = [
     '#84cc16', '#e879f9', '#22d3ee', '#a78bfa',
 ];
 
-const CAUSAL_TYPES = new Set([
-    'causes', 'branches_into', 'creates', 'inspires', 'makes',
-    'parent_of', 'originates_in',
-]);
+
 
 // ─── DAG Layer Assignment ───────────────────────────────────────
 function assignLayers(

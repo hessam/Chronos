@@ -3,6 +3,7 @@ import * as d3 from 'd3';
 import type { Entity, Relationship, TimelineVariant } from '../store/appStore';
 import { useGraphEngine } from '../hooks/useGraphEngine';
 import type { GraphNode, GraphLink } from '../hooks/useGraphEngine';
+import { QUICK_REL_TYPES } from '../constants/relationships';
 
 /* ================================================================
    CausalityGraph — DAG with context zone
@@ -56,18 +57,7 @@ interface QuickConnect {
     x: number; y: number;
 }
 
-const QUICK_REL_TYPES = [
-    { value: 'causes', label: '⚡ Causes', color: '#f59e0b' },
-    { value: 'involves', label: '🤝 Involves', color: '#6366f1' },
-    { value: 'creates', label: '✨ Creates', color: '#10b981' },
-    { value: 'blocks', label: '🚫 Blocks', color: '#ef4444' },
-    { value: 'motivates', label: '💪 Motivates', color: '#8b5cf6' },
-    { value: 'references', label: '📎 References', color: '#64748b' },
-    { value: 'parent_of', label: '🌳 Parent Of', color: '#06b6d4' },
-    { value: 'located_at', label: '📍 Located At', color: '#ec4899' },
-    { value: 'branches_into', label: '🔀 Branches Into', color: '#f97316' },
-    { value: 'inspires', label: '💡 Inspires', color: '#eab308' },
-];
+
 
 const ENTITY_CREATE_TYPES = [
     { type: 'event', icon: '⚡', label: 'Event' },

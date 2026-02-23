@@ -3,6 +3,8 @@
    8pt Grid | Dark Mode | Monochromatic + Accent
    ============================================================ */
 
+@import './cowrite.css';
+
 :root {
   /* ─── Spacing (8pt grid) ──────────────────────────────── */
   --space-1: 8px;
@@ -478,6 +480,10 @@ a:hover {
 .entity-item.active {
   background: var(--accent-muted);
   color: var(--accent);
+}
+
+.entity-item:hover .sidebar-actions {
+  opacity: 1 !important;
 }
 
 .entity-icon {

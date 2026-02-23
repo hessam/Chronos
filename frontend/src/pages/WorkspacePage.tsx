@@ -8,12 +8,15 @@ import { useAuthStore } from '../store/authStore';
 import CausalityGraph from '../components/CausalityGraph';
 import { CorrelationPanel } from '../components/CorrelationPanel';
 import TimelineExplorer from '../components/TimelineExplorer';
+import NarrativeAuditCanvas from '../components/NarrativeAuditCanvas';
+import CoWriteView from '../components/CoWriteView';
 import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
-import type { GeneratedIdea, GenerateIdeasResult, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
+import type { GeneratedIdea, GenerateIdeasResult, GenerateIdeasRequest, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
 import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
 
 import { BeatSequencer } from '../components/BeatSequencer';
+import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 const ENTITY_ICONS: Record<string, string> = {
     character: '👤',
@@ -68,6 +71,44 @@ export default function WorkspacePage() {
     const [newEntityDesc, setNewEntityDesc] = useState('');
     const [newEntityType, setNewEntityType] = useState<Entity['entity_type']>('character');
     const [newEntityProps, setNewEntityProps] = useState('');
+    const [newEntityStructuredProps, setNewEntityStructuredProps] = useState<{ key: string; value: string }[]>([]);
+
+    // Type-aware default property fields
+    const TYPE_DEFAULT_FIELDS: Record<string, { key: string; placeholder: string }[]> = {
+        character: [
+            { key: 'motivations', placeholder: 'Revenge, justice, love...' },
+            { key: 'biography', placeholder: 'Born in a small village...' },
+            { key: 'traits', placeholder: 'Brave, cunning, loyal...' },
+        ],
+        event: [
+            { key: 'timestamp', placeholder: '2157-06-15 or "Day 3"' },
+            { key: 'participants', placeholder: 'Alice, Bob, The Council' },
+            { key: 'outcome', placeholder: 'The alliance was shattered...' },
+        ],
+        arc: [
+            { key: 'phases', placeholder: 'Setup, Confrontation, Resolution' },
+            { key: 'theme', placeholder: 'Coming of age, betrayal...' },
+        ],
+        location: [
+            { key: 'atmosphere', placeholder: 'Mysterious, foreboding...' },
+            { key: 'significance', placeholder: 'Central hub of the rebellion...' },
+        ],
+        theme: [
+            { key: 'symbolism', placeholder: 'The broken clock, the red door...' },
+        ],
+        note: [],
+        chapter: [
+            { key: 'pov_character', placeholder: 'Alice' },
+            { key: 'word_target', placeholder: '3000' },
+        ],
+    };
+
+    // Sync default fields when type changes
+    useEffect(() => {
+        const defaults = TYPE_DEFAULT_FIELDS[newEntityType] || [];
+        setNewEntityStructuredProps(defaults.map(d => ({ key: d.key, value: '' })));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [newEntityType]);
 
     // AI State
     const [aiIdeasCache, setAiIdeasCache] = useState<Record<string, GeneratedIdea[]>>({});
@@ -88,10 +129,13 @@ export default function WorkspacePage() {
     const [editingField, setEditingField] = useState<string | null>(null);
     const [editNameVal, setEditNameVal] = useState('');
     const [editDescVal, setEditDescVal] = useState('');
+    const [sidebarConfirmDeleteId, setSidebarConfirmDeleteId] = useState<string | null>(null);
+    const [sidebarRenameId, setSidebarRenameId] = useState<string | null>(null);
+    const [sidebarRenameVal, setSidebarRenameVal] = useState('');
 
     // Timeline visibility toggles
     const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
-    const [viewMode, setViewMode] = useState<'graph' | 'timeline'>('graph');
+    const [viewMode, setViewMode] = useState<'graph' | 'timeline' | 'audit' | 'cowrite'>('graph');
     // Drag-and-drop reorder state (events only)
     const [draggedEntityId, setDraggedEntityId] = useState<string | null>(null);
     const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
@@ -124,7 +168,7 @@ export default function WorkspacePage() {
             };
 
             const result = await generateIdeas(request);
-            if (result.error) throw new Error(result.error);
+            if ('error' in result && result.error) throw new Error(String(result.error));
 
             setAiResult(result);
             // Save to cache for this entity
@@ -961,9 +1005,19 @@ export default function WorkspacePage() {
 
     function handleCreateEntity(e: FormEvent) {
         e.preventDefault();
-        let properties = {};
+        // Build properties from structured fields
+        const properties: Record<string, unknown> = {};
+        for (const { key, value } of newEntityStructuredProps) {
+            const k = key.trim().replace(/\s+/g, '_').toLowerCase();
+            if (!k || !value.trim()) continue;
+            // Try to parse JSON values (arrays, numbers, booleans)
+            let parsed: unknown = value;
+            try { parsed = JSON.parse(value); } catch { /* keep as string */ }
+            properties[k] = parsed;
+        }
+        // Also merge any raw JSON props (fallback for advanced users)
         if (newEntityProps.trim()) {
-            try { properties = JSON.parse(newEntityProps); }
+            try { Object.assign(properties, JSON.parse(newEntityProps)); }
             catch { /* ignore parse errors */ }
         }
         createEntity.mutate({
@@ -1232,7 +1286,7 @@ export default function WorkspacePage() {
                             overflow: 'hidden',
                         }}>
                             <button
-                                onClick={() => setViewMode('graph')}
+                                onClick={() => { setViewMode('graph'); setSelectedEntity(null); setAiError(null); }}
                                 style={{
                                     flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
                                     fontWeight: viewMode === 'graph' ? 600 : 400,
@@ -1246,7 +1300,7 @@ export default function WorkspacePage() {
                                 🕸️ Causality Graph
                             </button>
                             <button
-                                onClick={() => setViewMode('timeline')}
+                                onClick={() => { setViewMode('timeline'); setSelectedEntity(null); setAiError(null); }}
                                 style={{
                                     flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
                                     fontWeight: viewMode === 'timeline' ? 600 : 400,
@@ -1257,6 +1311,32 @@ export default function WorkspacePage() {
                                 }}
                             >
                                 📐 Timeline Explorer
+                            </button>
+                            <button
+                                onClick={() => { setViewMode('audit'); setSelectedEntity(null); setAiError(null); }}
+                                style={{
+                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                    fontWeight: viewMode === 'audit' ? 600 : 400,
+                                    background: viewMode === 'audit' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                    color: viewMode === 'audit' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                    border: 'none', cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                📋 Narrative Audit
+                            </button>
+                            <button
+                                onClick={() => { setViewMode('cowrite'); setSelectedEntity(null); setAiError(null); }}
+                                style={{
+                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                    fontWeight: viewMode === 'cowrite' ? 600 : 400,
+                                    background: viewMode === 'cowrite' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                    color: viewMode === 'cowrite' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                    border: 'none', cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                ✍️ Co-Write
                             </button>
                         </div>
                     </div>
@@ -1344,7 +1424,7 @@ export default function WorkspacePage() {
                         </div>
                     ) : (
                         <div className="entity-list">
-                            {filteredEntities.map((entity, index) => {
+                            {filteredEntities.map((entity) => {
                                 const entityVariantTimelines = variantMap.get(entity.id) || [];
                                 const isEvent = entity.entity_type === 'event';
                                 const isDragged = draggedEntityId === entity.id;
@@ -1446,11 +1526,99 @@ export default function WorkspacePage() {
 
                                         <div className="entity-icon">{ENTITY_ICONS[entity.entity_type]}</div>
                                         <div style={{ flex: 1, minWidth: 0 }}>
-                                            <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                {focusedTimelineId ? resolveEntity(entity, focusedTimelineId, allVariants).name : entity.name}
-                                            </div>
-                                            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>{entity.entity_type}</div>
+                                            {sidebarRenameId === entity.id ? (
+                                                <input
+                                                    className="input"
+                                                    autoFocus
+                                                    value={sidebarRenameVal}
+                                                    onChange={(e) => setSidebarRenameVal(e.target.value)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    style={{ fontSize: 'var(--text-sm)', padding: '2px 6px', height: 'auto', width: '100%' }}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter' && sidebarRenameVal.trim()) {
+                                                            updateEntity.mutate({ id: entity.id, body: { name: sidebarRenameVal.trim() } });
+                                                            setSidebarRenameId(null);
+                                                        }
+                                                        if (e.key === 'Escape') setSidebarRenameId(null);
+                                                    }}
+                                                    onBlur={() => {
+                                                        if (sidebarRenameVal.trim() && sidebarRenameVal.trim() !== entity.name) {
+                                                            updateEntity.mutate({ id: entity.id, body: { name: sidebarRenameVal.trim() } });
+                                                        }
+                                                        setSidebarRenameId(null);
+                                                    }}
+                                                />
+                                            ) : (
+                                                <>
+                                                    <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {focusedTimelineId ? resolveEntity(entity, focusedTimelineId, allVariants).name : entity.name}
+                                                    </div>
+                                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>{entity.entity_type}</div>
+                                                </>
+                                            )}
                                         </div>
+
+                                        {/* Hover Action Buttons */}
+                                        {sidebarConfirmDeleteId === entity.id ? (
+                                            <div
+                                                style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}
+                                                onClick={(e) => e.stopPropagation()}
+                                            >
+                                                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--error)' }}>Delete?</span>
+                                                <button
+                                                    onClick={() => {
+                                                        deleteEntity.mutate(entity.id);
+                                                        setSidebarConfirmDeleteId(null);
+                                                        if (selectedEntity?.id === entity.id) setSelectedEntity(null);
+                                                    }}
+                                                    style={{
+                                                        background: 'var(--error)', color: 'white', border: 'none',
+                                                        borderRadius: 'var(--radius-sm)', padding: '1px 6px',
+                                                        fontSize: 11, cursor: 'pointer',
+                                                    }}
+                                                >✓</button>
+                                                <button
+                                                    onClick={() => setSidebarConfirmDeleteId(null)}
+                                                    style={{
+                                                        background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                                                        border: 'none', borderRadius: 'var(--radius-sm)',
+                                                        padding: '1px 6px', fontSize: 11, cursor: 'pointer',
+                                                    }}
+                                                >✕</button>
+                                            </div>
+                                        ) : (
+                                            <div
+                                                className="sidebar-actions"
+                                                style={{
+                                                    display: 'flex', gap: 2, alignItems: 'center', flexShrink: 0,
+                                                    opacity: 0, transition: 'opacity 0.15s',
+                                                }}
+                                                onClick={(e) => e.stopPropagation()}
+                                            >
+                                                <button
+                                                    title="Rename"
+                                                    onClick={() => { setSidebarRenameId(entity.id); setSidebarRenameVal(entity.name); }}
+                                                    style={{
+                                                        background: 'none', border: 'none', cursor: 'pointer',
+                                                        color: 'var(--text-tertiary)', fontSize: 12, padding: '2px 4px',
+                                                        borderRadius: 'var(--radius-sm)',
+                                                    }}
+                                                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--accent)')}
+                                                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+                                                >✏️</button>
+                                                <button
+                                                    title="Delete"
+                                                    onClick={() => setSidebarConfirmDeleteId(entity.id)}
+                                                    style={{
+                                                        background: 'none', border: 'none', cursor: 'pointer',
+                                                        color: 'var(--text-tertiary)', fontSize: 12, padding: '2px 4px',
+                                                        borderRadius: 'var(--radius-sm)',
+                                                    }}
+                                                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--error)')}
+                                                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+                                                >🗑️</button>
+                                            </div>
+                                        )}
 
                                         {/* Drag handle (Events only) */}
                                         {isEvent && !focusedTimelineId && (
@@ -1673,6 +1841,33 @@ export default function WorkspacePage() {
                                     />
                                 )}
                             </div>
+                        ) : viewMode === 'audit' ? (
+                            <NarrativeAuditCanvas
+                                entities={allEntities}
+                                relationships={projectRelationships}
+                                onEntitySelect={setSelectedEntity}
+                                onEntityUpdate={(id, body) => updateEntity.mutate({ id, body })}
+                                onEntityDelete={(id) => deleteEntity.mutate(id)}
+                                onEntityCreate={(body) => createEntity.mutate({
+                                    entity_type: body.entity_type,
+                                    name: body.name,
+                                    description: body.description,
+                                    properties: body.properties,
+                                })}
+                                onRelationshipCreate={(body) => createRelationship.mutate({
+                                    from_entity_id: body.from_entity_id,
+                                    to_entity_id: body.to_entity_id,
+                                    relationship_type: body.relationship_type,
+                                    metadata: body.metadata,
+                                })}
+                            />
+                        ) : viewMode === 'cowrite' ? (
+                            <CoWriteView
+                                entities={allEntities}
+                                relationships={projectRelationships}
+                                onEntityUpdate={(id, body) => updateEntity.mutate({ id, body })}
+                                projectContext={currentProject?.description || ''}
+                            />
                         ) : (
                             <TimelineExplorer
                                 entities={canvasEntities}
@@ -1894,19 +2089,155 @@ export default function WorkspacePage() {
                                         )}
                                     </div>
 
-                                    {Object.keys(displayEntity.properties).filter(k => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level'].includes(k)).length > 0 && (
-                                        <div style={{ marginBottom: 'var(--space-3)' }}>
-                                            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-1)', color: 'var(--text-secondary)' }}>Properties</h3>
-                                            {Object.entries(displayEntity.properties)
-                                                .filter(([key]) => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level'].includes(key))
-                                                .map(([key, value]) => (
-                                                    <div key={key} style={{ display: 'flex', gap: 'var(--space-2)', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                                                        <span style={{ fontWeight: 500, minWidth: 120, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
-                                                        <span>{typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value)}</span>
-                                                    </div>
-                                                ))}
+                                    {/* ─── Editable Properties Grid ─── */}
+                                    <div style={{ marginBottom: 'var(--space-3)' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-1)' }}>
+                                            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-secondary)' }}>Properties</h3>
+                                            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                                                {Object.keys(selectedEntity.properties).filter(k => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level', 'position_x', 'position_y'].includes(k)).length} fields
+                                            </span>
                                         </div>
-                                    )}
+                                        {Object.entries(selectedEntity.properties)
+                                            .filter(([key]) => !['scene_card', 'voice_samples', 'draft_text', 'pov_character', 'timestamp', 'chapter_blueprint', 'emotion_level', 'position_x', 'position_y'].includes(key))
+                                            .map(([key, value]) => (
+                                                <div key={key} style={{
+                                                    display: 'flex', alignItems: 'center', gap: 8,
+                                                    padding: '6px 8px', borderBottom: '1px solid var(--border)',
+                                                    borderRadius: 'var(--radius-sm)',
+                                                }}>
+                                                    <span style={{
+                                                        fontWeight: 500, minWidth: 110, color: 'var(--text-secondary)',
+                                                        textTransform: 'capitalize', fontSize: 'var(--text-sm)',
+                                                        flexShrink: 0,
+                                                    }}>
+                                                        {key.replace(/_/g, ' ')}
+                                                    </span>
+                                                    {editingField === `prop:${key}` ? (
+                                                        <input
+                                                            className="input"
+                                                            autoFocus
+                                                            defaultValue={typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? '')}
+                                                            style={{ flex: 1, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 'auto' }}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter') {
+                                                                    const raw = (e.target as HTMLInputElement).value;
+                                                                    let parsed: unknown = raw;
+                                                                    try { parsed = JSON.parse(raw); } catch { /* keep as string */ }
+                                                                    const newProps = { ...selectedEntity.properties, [key]: parsed };
+                                                                    updateEntity.mutate({ id: selectedEntity.id, body: { properties: newProps } });
+                                                                    setEditingField(null);
+                                                                }
+                                                                if (e.key === 'Escape') setEditingField(null);
+                                                            }}
+                                                            onBlur={(e) => {
+                                                                const raw = e.target.value;
+                                                                let parsed: unknown = raw;
+                                                                try { parsed = JSON.parse(raw); } catch { /* keep as string */ }
+                                                                if (String(parsed) !== String(value)) {
+                                                                    const newProps = { ...selectedEntity.properties, [key]: parsed };
+                                                                    updateEntity.mutate({ id: selectedEntity.id, body: { properties: newProps } });
+                                                                }
+                                                                setEditingField(null);
+                                                            }}
+                                                        />
+                                                    ) : (
+                                                        <span
+                                                            style={{
+                                                                flex: 1, fontSize: 'var(--text-sm)', cursor: 'pointer',
+                                                                padding: '4px 8px', borderRadius: 'var(--radius-sm)',
+                                                                border: '1px solid transparent', transition: 'border-color 0.15s',
+                                                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                            }}
+                                                            title={`Click to edit · ${typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')}`}
+                                                            onClick={() => setEditingField(`prop:${key}`)}
+                                                            onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+                                                            onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'transparent')}
+                                                        >
+                                                            {value === null || value === undefined || value === ''
+                                                                ? <span style={{ color: 'var(--text-tertiary)', fontStyle: 'italic' }}>empty</span>
+                                                                : typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                                                        </span>
+                                                    )}
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const newProps = { ...selectedEntity.properties };
+                                                            delete newProps[key];
+                                                            updateEntity.mutate({ id: selectedEntity.id, body: { properties: newProps } });
+                                                        }}
+                                                        title="Remove property"
+                                                        style={{
+                                                            background: 'none', border: 'none', cursor: 'pointer',
+                                                            color: 'var(--text-tertiary)', fontSize: 12, padding: '2px 4px',
+                                                            borderRadius: 'var(--radius-sm)', flexShrink: 0,
+                                                            opacity: 0.4, transition: 'opacity 0.15s, color 0.15s',
+                                                        }}
+                                                        onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--error)'; }}
+                                                        onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.4'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+                                                    >✕</button>
+                                                </div>
+                                            ))}
+                                        {/* ─── Add New Property Row ─── */}
+                                        {editingField === 'prop:__new__' ? (
+                                            <div style={{ display: 'flex', gap: 6, padding: '6px 0', alignItems: 'center' }}>
+                                                <input
+                                                    className="input"
+                                                    autoFocus
+                                                    placeholder="key"
+                                                    id="new-prop-key"
+                                                    style={{ width: 110, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 'auto', flexShrink: 0 }}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            (document.getElementById('new-prop-val') as HTMLInputElement)?.focus();
+                                                        }
+                                                        if (e.key === 'Escape') setEditingField(null);
+                                                    }}
+                                                />
+                                                <input
+                                                    className="input"
+                                                    placeholder="value"
+                                                    id="new-prop-val"
+                                                    style={{ flex: 1, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 'auto' }}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            const keyInput = document.getElementById('new-prop-key') as HTMLInputElement;
+                                                            const valInput = e.target as HTMLInputElement;
+                                                            const k = keyInput?.value.trim().replace(/\s+/g, '_').toLowerCase();
+                                                            const v = valInput?.value;
+                                                            if (k) {
+                                                                let parsed: unknown = v;
+                                                                try { parsed = JSON.parse(v); } catch { /* keep as string */ }
+                                                                const newProps = { ...selectedEntity.properties, [k]: parsed };
+                                                                updateEntity.mutate({ id: selectedEntity.id, body: { properties: newProps } });
+                                                            }
+                                                            setEditingField(null);
+                                                        }
+                                                        if (e.key === 'Escape') setEditingField(null);
+                                                    }}
+                                                />
+                                                <button
+                                                    className="btn btn-ghost btn-sm"
+                                                    onClick={() => setEditingField(null)}
+                                                    style={{ padding: '2px 6px', fontSize: 10 }}
+                                                >✕</button>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                onClick={() => setEditingField('prop:__new__')}
+                                                style={{
+                                                    width: '100%', padding: '8px', marginTop: 4,
+                                                    background: 'none', border: '1px dashed var(--border)',
+                                                    borderRadius: 'var(--radius-md)', cursor: 'pointer',
+                                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
+                                                    transition: 'all 0.15s',
+                                                }}
+                                                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; }}
+                                                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+                                            >
+                                                + Add Property
+                                            </button>
+                                        )}
+                                    </div>
 
                                     {/* AI Idea Generation (E3-US3) */}
                                     <div style={{
@@ -2218,17 +2549,66 @@ export default function WorkspacePage() {
                                         Connections for <strong>{selectedEntity.name}</strong>. Add relationships to other entities.
                                     </div>
 
-                                    <button
-                                        className="btn btn-primary btn-sm"
-                                        style={{ width: '100%', marginBottom: 'var(--space-3)' }}
-                                        onClick={() => {
-                                            setRelFromId(selectedEntity.id);
-                                            setRelToId(null);
-                                            setShowCreateRelModal(true);
-                                        }}
-                                    >
-                                        + Add Relationship
-                                    </button>
+                                    {/* ─── Inline Quick-Add ─── */}
+                                    <div style={{
+                                        display: 'flex', gap: 6, alignItems: 'center',
+                                        marginBottom: 'var(--space-3)', flexWrap: 'wrap',
+                                    }}>
+                                        <select
+                                            className="input"
+                                            id="quick-rel-target"
+                                            style={{ flex: 1, minWidth: 100, height: 32, fontSize: 'var(--text-sm)', padding: '0 8px' }}
+                                            defaultValue=""
+                                        >
+                                            <option value="" disabled>Target entity…</option>
+                                            {allEntities.filter((e: Entity) => e.id !== selectedEntity.id).map((e: Entity) => (
+                                                <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
+                                            ))}
+                                        </select>
+                                        <select
+                                            className="input"
+                                            id="quick-rel-type"
+                                            style={{ width: 120, height: 32, fontSize: 'var(--text-sm)', padding: '0 8px', flexShrink: 0 }}
+                                            defaultValue="causes"
+                                        >
+                                            {RELATIONSHIP_TYPES.map(t => (
+                                                <option key={t} value={t}>{t}</option>
+                                            ))}
+                                        </select>
+                                        <button
+                                            className="btn btn-primary btn-sm"
+                                            style={{ height: 32, padding: '0 12px', flexShrink: 0 }}
+                                            onClick={() => {
+                                                const target = (document.getElementById('quick-rel-target') as HTMLSelectElement)?.value;
+                                                const type = (document.getElementById('quick-rel-type') as HTMLSelectElement)?.value || 'causes';
+                                                if (!target) return;
+                                                createRelationship.mutate({
+                                                    from_entity_id: selectedEntity.id,
+                                                    to_entity_id: target,
+                                                    relationship_type: type,
+                                                    metadata: { strength: 3 },
+                                                });
+                                                // Reset after creation
+                                                const sel = document.getElementById('quick-rel-target') as HTMLSelectElement;
+                                                if (sel) sel.value = '';
+                                            }}
+                                        >
+                                            🔗 Link
+                                        </button>
+                                    </div>
+                                    <div style={{ textAlign: 'right', marginBottom: 'var(--space-2)' }}>
+                                        <button
+                                            className="btn btn-ghost btn-sm"
+                                            style={{ fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+                                            onClick={() => {
+                                                setRelFromId(selectedEntity.id);
+                                                setRelToId(null);
+                                                setShowCreateRelModal(true);
+                                            }}
+                                        >
+                                            More options… (label, strength)
+                                        </button>
+                                    </div>
 
                                     {/* Relationship list */}
                                     {(() => {
@@ -2936,23 +3316,61 @@ export default function WorkspacePage() {
                                     placeholder="Describe this entity..."
                                 />
                             </div>
+                            {/* ─── Type-Aware Properties ─── */}
                             <div className="form-group">
-                                <label className="label">Properties (JSON, optional)</label>
-                                <textarea
-                                    className="textarea"
-                                    value={newEntityProps}
-                                    onChange={(e) => setNewEntityProps(e.target.value)}
-                                    placeholder={newEntityType === 'character'
-                                        ? '{"motivations": ["Revenge"], "biography": "Born in..."}'
-                                        : newEntityType === 'event'
-                                            ? '{"timestamp": "2157-06-15", "participants": []}'
-                                            : newEntityType === 'arc'
-                                                ? '{"phases": ["Setup", "Confrontation", "Resolution"]}'
-                                                : newEntityType === 'location'
-                                                    ? '{"coordinates": "", "atmosphere": "mysterious"}'
-                                                    : '{}'}
-                                    style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)' }}
-                                />
+                                <label className="label">Properties</label>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    {newEntityStructuredProps.map((prop, i) => (
+                                        <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                            <input
+                                                className="input"
+                                                value={prop.key}
+                                                onChange={(e) => {
+                                                    const next = [...newEntityStructuredProps];
+                                                    next[i] = { ...next[i], key: e.target.value };
+                                                    setNewEntityStructuredProps(next);
+                                                }}
+                                                placeholder="key"
+                                                style={{ width: 110, flexShrink: 0, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
+                                            />
+                                            <input
+                                                className="input"
+                                                value={prop.value}
+                                                onChange={(e) => {
+                                                    const next = [...newEntityStructuredProps];
+                                                    next[i] = { ...next[i], value: e.target.value };
+                                                    setNewEntityStructuredProps(next);
+                                                }}
+                                                placeholder={(TYPE_DEFAULT_FIELDS[newEntityType] || []).find(d => d.key === prop.key)?.placeholder || 'value'}
+                                                style={{ flex: 1, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setNewEntityStructuredProps(prev => prev.filter((_, j) => j !== i))}
+                                                style={{
+                                                    background: 'none', border: 'none', cursor: 'pointer',
+                                                    color: 'var(--text-tertiary)', fontSize: 14, padding: '2px 4px',
+                                                    flexShrink: 0,
+                                                }}
+                                                title="Remove"
+                                            >✕</button>
+                                        </div>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={() => setNewEntityStructuredProps(prev => [...prev, { key: '', value: '' }])}
+                                        style={{
+                                            padding: '6px', background: 'none',
+                                            border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)',
+                                            cursor: 'pointer', color: 'var(--text-tertiary)',
+                                            fontSize: 'var(--text-sm)', transition: 'all 0.15s',
+                                        }}
+                                        onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; }}
+                                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+                                    >
+                                        + Add Field
+                                    </button>
+                                </div>
                             </div>
                             <div className="modal-actions">
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowCreateEntity(false)}>Cancel</button>
@@ -3173,7 +3591,7 @@ export default function WorkspacePage() {
                             onChange={(e) => setRelType(e.target.value)}
                             style={{ width: '100%', marginBottom: 'var(--space-2)' }}
                         >
-                            {['arrives_before', 'blocks', 'branches_into', 'causes', 'costs', 'could_restore', 'creates', 'currently_in', 'ends_at', 'exists_in', 'inspires', 'involves', 'located_at', 'makes', 'means', 'motivates', 'originates_in', 'parent_of', 'prevents', 'references', 'requires', 'separates', 'sibling_of', 'threatens'].map(t => (
+                            {RELATIONSHIP_TYPES.map(t => (
                                 <option key={t} value={t}>{t}</option>
                             ))}
                         </select>

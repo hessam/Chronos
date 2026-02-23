@@ -1921,3 +1921,292 @@ export function analyzeTemporalGaps(
 
     return gaps;
 }
+
+// ─── Co-Write Orchestrator (Wave 3 Feature 1) ──────────────
+
+export interface CoWriteOptions {
+    tone: 'literary' | 'commercial' | 'minimalist' | 'lyrical' | 'cinematic';
+    pov: 'first' | 'second' | 'third_limited' | 'third_omniscient';
+    tense: 'past' | 'present';
+    targetWordCount: number;
+    styleReference?: string;
+    includeDialogue: boolean;
+    emotionalIntensity: 1 | 2 | 3 | 4 | 5;
+    previousChapterSummary?: string;
+    nextChapterHint?: string;
+}
+
+export interface CoWriteRequest {
+    eventName: string;
+    eventDescription: string;
+    characters: Array<{ name: string; description: string; voiceSamples?: VoiceSample[] }>;
+    locations: Array<{ name: string; description: string }>;
+    themes: Array<{ name: string; description: string }>;
+    options: CoWriteOptions;
+    projectContext?: string;
+}
+
+export interface CoWriteResult {
+    prose: string;
+    sceneCard: SceneCard;
+    model: string;
+    provider: AIProvider;
+}
+
+export async function coWriteScene(
+    req: CoWriteRequest,
+    settings?: AISettings
+): Promise<CoWriteResult> {
+    const aiSettings = settings || loadAISettings();
+    
+    // Step 1: Generate or refine the scene card
+    const scReq: GenerateSceneRequest = {
+        eventName: req.eventName,
+        eventDescription: req.eventDescription,
+        connectedCharacters: req.characters,
+        connectedLocations: req.locations,
+        connectedThemes: req.themes,
+        projectContext: req.projectContext
+    };
+    const scResult = await generateSceneCard(scReq, aiSettings);
+    
+    // Step 2: Get beats
+    const beatsReq = {
+        entityName: req.eventName,
+        entityDescription: `${req.eventDescription}\n\nScene Plan:\nPOV: ${scResult.sceneCard.pov}\nGoal: ${scResult.sceneCard.goal}\nConflict: ${scResult.sceneCard.conflict}`,
+        projectContext: req.projectContext
+    };
+    const beats = await suggestBeats(beatsReq, aiSettings);
+    
+    // Step 3: Orchestrate prose generation for all beats
+    let fullProse = "";
+    
+    const stylePrompt = `
+Tone: ${req.options.tone}
+POV: ${req.options.pov}
+Tense: ${req.options.tense}
+${req.options.styleReference ? `Style Reference: ${req.options.styleReference}` : ''}
+${req.options.includeDialogue ? 'Include natural dialogue where appropriate.' : 'Keep dialogue to a minimum.'}
+Emotional Intensity (1-5): ${req.options.emotionalIntensity}
+    `.trim();
+
+    for (let i = 0; i < beats.length; i++) {
+        const beat = beats[i];
+        
+        // Context includes the style rules and previous prose
+        const proseReq: GenerateBeatProseRequest = {
+            beat,
+            context: {
+                entityName: req.eventName,
+                entityDescription: `Scene Plan:\n${JSON.stringify(scResult.sceneCard)}\n\nStyle Guide:\n${stylePrompt}`,
+                previousProse: fullProse.slice(-2000), // Send last ~2000 chars for continuity
+                projectContext: req.projectContext
+            }
+        };
+        
+        const beatProse = await generateBeatProse(proseReq, aiSettings);
+        fullProse += (fullProse ? "\n\n" : "") + beatProse;
+    }
+    
+    return {
+        prose: fullProse,
+        sceneCard: scResult.sceneCard,
+        model: scResult.model,
+        provider: scResult.provider
+    };
+}
+
+// ─── Pacing Analyzer (Wave 3 Feature 2) ────────────────────
+
+export interface PacingPacingEvent {
+    id: string;
+    name: string;
+    emotionLevel: number;
+    wordCount?: number;
+}
+
+export interface PacingRequest {
+    events: PacingPacingEvent[];
+    projectName: string;
+}
+
+export interface PacingResult {
+    score: number;
+    actStructure: Array<{
+        name: string;
+        events: string[];
+        pacingLabel: 'too_fast' | 'too_slow' | 'good';
+    }>;
+    suggestions: string[];
+    model: string;
+    provider: AIProvider;
+}
+
+export async function analyzePacing(
+    req: PacingRequest,
+    settings?: AISettings
+): Promise<PacingResult> {
+    const aiSettings = settings || loadAISettings();
+    
+    const prompt = `You are a structural editor for a novel. Analyze the pacing of these sequential events.
+    
+PROJECT: ${req.projectName}
+EVENTS IN ORDER:
+${req.events.map((e, i) => `${i+1}. ${e.name} (Emotion: ${e.emotionLevel}, Words: ${e.wordCount || 'unknown'})`).join('\n')}
+
+Analyze the rhythm of peaks (high emotion) and valleys (low emotion). Look for:
+1. Long stretches of low emotion (dragging pacing).
+2. Continuous high emotion without breathing room (exhausting pacing).
+3. Missing act breaks.
+
+Return ONLY JSON:
+{
+  "score": 85, // 0-100 overall pacing score
+  "actStructure": [
+    { "name": "Act 1: Setup", "events": ["event1", "event2"], "pacingLabel": "good" }
+  ],
+  "suggestions": [
+     "Add a quiet reflection scene after the battle to give the reader a break."
+  ]
+}`;
+
+    const raw = await callProviderForAnalysis(aiSettings.defaultProvider, aiSettings.defaultModel, prompt, aiSettings.apiKeys[aiSettings.defaultProvider] || '');
+    let jsonStr = raw;
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) jsonStr = match[1];
+    const parsed = JSON.parse(jsonStr.trim());
+    
+    return {
+        ...parsed,
+        model: aiSettings.defaultModel,
+        provider: aiSettings.defaultProvider
+    };
+}
+
+// ─── Thematic Threading Analyzer (Wave 3 Feature 3) ────────
+
+export interface ThematicRequest {
+    events: Array<{ name: string; description: string; chapter?: string }>;
+    themes: Array<{ name: string; description: string }>;
+    relationships: Array<{ from: string; to: string; type: string }>;
+    projectName: string;
+}
+
+export interface ThematicResult {
+    themeCoverage: Record<string, {
+        score: number; // 0-100
+        strongestAct: string;
+        weakestAct: string;
+        suggestion: string;
+    }>;
+    model: string;
+    provider: AIProvider;
+}
+
+export async function analyzeThematicThreading(
+    req: ThematicRequest,
+    settings?: AISettings
+): Promise<ThematicResult> {
+    const aiSettings = settings || loadAISettings();
+    
+    if (req.themes.length === 0) {
+        return { themeCoverage: {}, model: 'local', provider: 'openai' };
+    }
+
+    const prompt = `You are a narrative editor analyzing thematic threading in a novel.
+    
+PROJECT: ${req.projectName}
+
+THEMES TO TRACK:
+${req.themes.map(t => `- ${t.name}: ${t.description}`).join('\n')}
+
+EVENTS:
+${req.events.map((e, i) => `${i+1}. [${e.chapter || 'No Chapter'}] ${e.name}: ${e.description}`).join('\n')}
+
+Analyze how well each theme is explored across the beginning, middle, and end of these events.
+For each theme, provide:
+1. Overall score (0-100)
+2. Strongest act/section
+3. Weakest act/section
+4. A specific suggestion to weave the theme into the weakest section.
+
+Return ONLY JSON:
+{
+  "themeCoverage": {
+    "Theme Name": {
+      "score": 85,
+      "strongestAct": "Act 1",
+      "weakestAct": "Act 3",
+      "suggestion": "Bring back the pocket watch motif during the final battle."
+    }
+  }
+}`;
+
+    const raw = await callProviderForAnalysis(aiSettings.defaultProvider, aiSettings.defaultModel, prompt, aiSettings.apiKeys[aiSettings.defaultProvider] || '');
+    let jsonStr = raw;
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) jsonStr = match[1];
+    const parsed = JSON.parse(jsonStr.trim());
+    
+    return {
+        ...parsed,
+        model: aiSettings.defaultModel,
+        provider: aiSettings.defaultProvider
+    };
+}
+
+// ─── Conflict Escalation Analyzer (Wave 3 Feature 4) ───────
+
+export interface ConflictRequest {
+    events: Array<{ name: string; description: string; charactersInvolved: string[] }>;
+    projectName: string;
+}
+
+export interface ConflictResult {
+    escalationScore: number; // 0-100
+    curve: Array<{ eventName: string; intensity: number; type: 'internal' | 'interpersonal' | 'environmental' }>;
+    plateauWarnings: string[];
+    suggestions: string[];
+    model: string;
+    provider: AIProvider;
+}
+
+export async function analyzeConflictEscalation(
+    req: ConflictRequest,
+    settings?: AISettings
+): Promise<ConflictResult> {
+    const aiSettings = settings || loadAISettings();
+    
+    const prompt = `You are a developmental editor analyzing conflict escalation.
+    
+PROJECT: ${req.projectName}
+EVENTS:
+${req.events.map((e, i) => `${i+1}. ${e.name}\n   Desc: ${e.description}\n   Chars: ${e.charactersInvolved.join(', ')}`).join('\n')}
+
+Analyze if the conflict is steadily rising. Look for:
+1. Plateaus (too many events with the same conflict level).
+2. De-escalation (stakes lowering instead of raising).
+3. The mix of internal, interpersonal, and environmental conflict.
+
+Return ONLY JSON:
+{
+  "escalationScore": 75,
+  "curve": [
+    { "eventName": "Event 1", "intensity": 2, "type": "interpersonal" }
+  ],
+  "plateauWarnings": ["Events 3-5 have the same tension level. Raise the stakes."],
+  "suggestions": ["Add an internal conflict for Character A during Event 4."]
+}`;
+
+    const raw = await callProviderForAnalysis(aiSettings.defaultProvider, aiSettings.defaultModel, prompt, aiSettings.apiKeys[aiSettings.defaultProvider] || '');
+    let jsonStr = raw;
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) jsonStr = match[1];
+    const parsed = JSON.parse(jsonStr.trim());
+    
+    return {
+        ...parsed,
+        model: aiSettings.defaultModel,
+        provider: aiSettings.defaultProvider
+    };
+}

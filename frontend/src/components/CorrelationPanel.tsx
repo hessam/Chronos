@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { Entity } from '../store/appStore';
+import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 /* ================================================================
    CorrelationPanel — Co-Relation Analyzer
@@ -14,13 +15,7 @@ const ENTITY_ICONS: Record<string, string> = {
     theme: '💎', location: '📍', note: '📝', chapter: '📖',
 };
 
-const RELATIONSHIP_TYPES = [
-    'causes', 'branches_into', 'creates', 'inspires', 'makes',
-    'parent_of', 'originates_in', 'involves', 'located_at',
-    'motivates', 'prevents', 'references', 'requires', 'threatens',
-    'blocks', 'arrives_before', 'sibling_of', 'currently_in',
-    'exists_in', 'ends_at', 'separates', 'costs', 'could_restore', 'means',
-];
+
 
 const ENTITY_TYPES = ['character', 'event', 'timeline', 'arc', 'theme', 'location', 'note', 'chapter'];
 
