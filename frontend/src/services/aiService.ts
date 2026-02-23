@@ -345,6 +345,8 @@ export async function generateIdeas(
 
 // ─── Beat Prose Generation (New Feature) ────────────────────
 
+import type { ContextReport } from './contextBuilder';
+
 export interface GenerateBeatProseRequest {
     beat: {
         description: string;
@@ -356,6 +358,7 @@ export interface GenerateBeatProseRequest {
         previousProse?: string;
         projectContext?: string;
     };
+    contextReport?: ContextReport;
 }
 
 export async function generateBeatProse(
@@ -363,19 +366,44 @@ export async function generateBeatProse(
     settings?: AISettings
 ): Promise<string> {
     const aiSettings = settings || loadAISettings();
-    const prompt = `You are an AI co-author for a novel.
+
+    let smartContextStr = '';
+    if (req.contextReport && req.contextReport.includedEntities.length > 0) {
+        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment:\n`;
+        req.contextReport.includedEntities.forEach(e => {
+            smartContextStr += `- ${e.name} (${e.entity_type}): ${e.description}\n`;
+            if (e.properties) {
+                // Selectively stringify some properties if useful, but keeping it brief to avoid massive tokens
+                const keyProps = Object.entries(e.properties)
+                    .filter(([k, v]) => k !== 'draft_prose' && k !== 'scene_beats' && typeof v === 'string')
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ');
+                if (keyProps) smartContextStr += `  Properties: ${keyProps}\n`;
+            }
+        });
+    }
+
+    const basePrompt = `You are an AI co-author for a novel.
     
 Context:
 Project: ${req.context.projectContext || 'Unknown Project'}
 Scene/Event: ${req.context.entityName} (${req.context.entityDescription})
 
-${req.context.previousProse ? `Previous Context:\n${req.context.previousProse}\n` : ''}
+${req.context.previousProse ? `Previous Context:\n${req.context.previousProse}\n` : ''}${smartContextStr}
 
 Current Beat (${req.beat.type}): ${req.beat.description}
 
 Task: Write a single paragraph of high-quality narrative prose for this beat. 
-Style: Show, don't tell. Engaging and atmospheric.
-Output: Just the prose, nothing else.`;
+Style Constraints:
+1. SHOW, DON'T TELL. Ground the scene in physical senses (sight, sound, smell, touch, taste).
+2. NO PURPLE PROSE. Limit adjectives. Zero abstract metaphors. Use hard, concrete nouns and active verbs.
+3. FORBIDDEN WORDS: "seemed to", "felt like", "realized", "suddenly", "began to".
+4. If the beat is "dialogue", include actual spoken words.
+
+Output: Just the prose paragraph, nothing else. No commentary.`;
+
+    // Implement Prompt Tachtique (Duplicate context for maximum instruction adherence)
+    const prompt = `${basePrompt}\n\n[RE-READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt}`;
 
     const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
     let lastError: Error | null = null;
@@ -397,7 +425,51 @@ Output: Just the prose, nothing else.`;
     throw new Error(lastError?.message || 'No AI provider available');
 }
 
+export interface DraftCritique {
+    id: string; // e.g. 'missing-conflict'
+    message: string; // e.g. 'Missing internal conflict before pulling lever'
+    suggestion: string; // e.g. 'Add a sentence about Protocol 7-Alpha.'
+    severity: 'high' | 'medium' | 'low';
+}
 
+export async function analyzeDraftProse(
+    draft: string,
+    beatDescription: string,
+    settings?: AISettings
+): Promise<DraftCritique[]> {
+    const aiSettings = settings || loadAISettings();
+    const prompt = `You are a strict prose editor examining a newly written draft against its intended beat.
+
+Intended Beat: ${beatDescription}
+
+Draft Prose:
+"""
+${draft}
+"""
+
+Analyze the draft and return an array of actionable critiques if it fails to meet the beat's implicit emotional or physical requirements, or if the consequences are too vague. Be extremely strict. If it's perfect, return an empty array.
+
+Return ONLY a JSON array of objects with the following keys:
+- "id": a short string identifier (e.g. "missing-conflict")
+- "message": what is wrong (e.g. "Missing internal conflict before action")
+- "suggestion": actionable fix (e.g. "Add a sentence hesitating before pulling the lever")
+- "severity": "high", "medium", or "low"
+`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        try {
+            const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
+            const jsonStr = text.replace(/```json\n?|\n?```/g, '').trim();
+            return JSON.parse(jsonStr) as DraftCritique[];
+        } catch (e) {
+            console.warn(`Provider ${provider} failed for analyzeDraftProse`, e);
+        }
+    }
+    return [];
+}
 
 export async function suggestBeats(
     context: {
@@ -405,22 +477,45 @@ export async function suggestBeats(
         entityDescription: string;
         projectContext?: string;
     },
-    settings?: AISettings
+    settings?: AISettings,
+    contextReport?: ContextReport
 ): Promise<Array<{ type: string; description: string }>> {
     const aiSettings = settings || loadAISettings();
-    const prompt = `You are an expert story outliner.
+
+    let smartContextStr = '';
+    if (contextReport && contextReport.includedEntities.length > 0) {
+        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment:\n`;
+        contextReport.includedEntities.forEach(e => {
+            smartContextStr += `- ${e.name} (${e.entity_type}): ${e.description}\n`;
+            if (e.properties) {
+                const keyProps = Object.entries(e.properties)
+                    .filter(([k, v]) => k !== 'draft_prose' && k !== 'scene_beats' && typeof v === 'string')
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ');
+                if (keyProps) smartContextStr += `  Properties: ${keyProps}\n`;
+            }
+        });
+    }
+
+    const basePrompt = `You are an expert story outliner.
     
 Context:
 Project: ${context.projectContext || 'Unknown'}
 Event: ${context.entityName}
 Description: ${context.entityDescription}
+${smartContextStr}
+Task: Break this event down into 5-8 distinct narrative beats (micro-events) that drive the story FORWARD.
+Constraint: Each beat must feature a concrete action, a piece of dialogue, or a clear discovery. Do not create beats where the character just stands and thinks.
 
-Task: Break this event down into 5-8 distinct narrative beats (micro-events).
 Format: Return ONLY a JSON array of objects with "type" (action, dialogue, emotion, description, internal) and "description" fields.
 Example: [{"type": "action", "description": "Hero enters the room."}, {"type": "dialogue", "description": "Villain laughs."}]`;
 
+    // Implement Prompt Tachtique
+    const prompt = `${basePrompt}\n\n[RE-READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt}`;
+
     const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
 
+    let lastError = null;
     for (const provider of providers) {
         if (!aiSettings.apiKeys[provider]) continue;
         const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
@@ -432,9 +527,10 @@ Example: [{"type": "action", "description": "Hero enters the room."}, {"type": "
             return JSON.parse(jsonStr);
         } catch (e) {
             console.warn(`Provider ${provider} failed for suggestBeats`, e);
+            lastError = e;
         }
     }
-    throw new Error('Failed to generate beats');
+    throw new Error('Failed to generate beats. ' + lastError);
 }
 
 export async function checkBeatConsistency(
@@ -1958,7 +2054,7 @@ export async function coWriteScene(
     settings?: AISettings
 ): Promise<CoWriteResult> {
     const aiSettings = settings || loadAISettings();
-    
+
     // Step 1: Generate or refine the scene card
     const scReq: GenerateSceneRequest = {
         eventName: req.eventName,
@@ -1969,7 +2065,7 @@ export async function coWriteScene(
         projectContext: req.projectContext
     };
     const scResult = await generateSceneCard(scReq, aiSettings);
-    
+
     // Step 2: Get beats
     const beatsReq = {
         entityName: req.eventName,
@@ -1977,10 +2073,10 @@ export async function coWriteScene(
         projectContext: req.projectContext
     };
     const beats = await suggestBeats(beatsReq, aiSettings);
-    
+
     // Step 3: Orchestrate prose generation for all beats
     let fullProse = "";
-    
+
     const stylePrompt = `
 Tone: ${req.options.tone}
 POV: ${req.options.pov}
@@ -1992,7 +2088,7 @@ Emotional Intensity (1-5): ${req.options.emotionalIntensity}
 
     for (let i = 0; i < beats.length; i++) {
         const beat = beats[i];
-        
+
         // Context includes the style rules and previous prose
         const proseReq: GenerateBeatProseRequest = {
             beat,
@@ -2003,11 +2099,11 @@ Emotional Intensity (1-5): ${req.options.emotionalIntensity}
                 projectContext: req.projectContext
             }
         };
-        
+
         const beatProse = await generateBeatProse(proseReq, aiSettings);
         fullProse += (fullProse ? "\n\n" : "") + beatProse;
     }
-    
+
     return {
         prose: fullProse,
         sceneCard: scResult.sceneCard,
@@ -2047,12 +2143,12 @@ export async function analyzePacing(
     settings?: AISettings
 ): Promise<PacingResult> {
     const aiSettings = settings || loadAISettings();
-    
+
     const prompt = `You are a structural editor for a novel. Analyze the pacing of these sequential events.
     
 PROJECT: ${req.projectName}
 EVENTS IN ORDER:
-${req.events.map((e, i) => `${i+1}. ${e.name} (Emotion: ${e.emotionLevel}, Words: ${e.wordCount || 'unknown'})`).join('\n')}
+${req.events.map((e, i) => `${i + 1}. ${e.name} (Emotion: ${e.emotionLevel}, Words: ${e.wordCount || 'unknown'})`).join('\n')}
 
 Analyze the rhythm of peaks (high emotion) and valleys (low emotion). Look for:
 1. Long stretches of low emotion (dragging pacing).
@@ -2075,7 +2171,7 @@ Return ONLY JSON:
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (match) jsonStr = match[1];
     const parsed = JSON.parse(jsonStr.trim());
-    
+
     return {
         ...parsed,
         model: aiSettings.defaultModel,
@@ -2108,7 +2204,7 @@ export async function analyzeThematicThreading(
     settings?: AISettings
 ): Promise<ThematicResult> {
     const aiSettings = settings || loadAISettings();
-    
+
     if (req.themes.length === 0) {
         return { themeCoverage: {}, model: 'local', provider: 'openai' };
     }
@@ -2121,7 +2217,7 @@ THEMES TO TRACK:
 ${req.themes.map(t => `- ${t.name}: ${t.description}`).join('\n')}
 
 EVENTS:
-${req.events.map((e, i) => `${i+1}. [${e.chapter || 'No Chapter'}] ${e.name}: ${e.description}`).join('\n')}
+${req.events.map((e, i) => `${i + 1}. [${e.chapter || 'No Chapter'}] ${e.name}: ${e.description}`).join('\n')}
 
 Analyze how well each theme is explored across the beginning, middle, and end of these events.
 For each theme, provide:
@@ -2147,7 +2243,7 @@ Return ONLY JSON:
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (match) jsonStr = match[1];
     const parsed = JSON.parse(jsonStr.trim());
-    
+
     return {
         ...parsed,
         model: aiSettings.defaultModel,
@@ -2176,12 +2272,12 @@ export async function analyzeConflictEscalation(
     settings?: AISettings
 ): Promise<ConflictResult> {
     const aiSettings = settings || loadAISettings();
-    
+
     const prompt = `You are a developmental editor analyzing conflict escalation.
     
 PROJECT: ${req.projectName}
 EVENTS:
-${req.events.map((e, i) => `${i+1}. ${e.name}\n   Desc: ${e.description}\n   Chars: ${e.charactersInvolved.join(', ')}`).join('\n')}
+${req.events.map((e, i) => `${i + 1}. ${e.name}\n   Desc: ${e.description}\n   Chars: ${e.charactersInvolved.join(', ')}`).join('\n')}
 
 Analyze if the conflict is steadily rising. Look for:
 1. Plateaus (too many events with the same conflict level).
@@ -2203,7 +2299,7 @@ Return ONLY JSON:
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (match) jsonStr = match[1];
     const parsed = JSON.parse(jsonStr.trim());
-    
+
     return {
         ...parsed,
         model: aiSettings.defaultModel,

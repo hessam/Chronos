@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import type { Entity, Relationship } from '../store/appStore';
-import { coWriteScene, analyzePacing, analyzeThematicThreading, analyzeConflictEscalation } from '../services/aiService';
-import type { CoWriteOptions, SceneCard, PacingResult, ThematicResult, ConflictResult } from '../services/aiService';
-
+import { analyzePacing, analyzeThematicThreading, analyzeConflictEscalation, suggestBeats, generateBeatProse, generateSceneCard, analyzeDraftProse } from '../services/aiService';
+import type { CoWriteOptions, SceneCard, PacingResult, ThematicResult, ConflictResult, DraftCritique } from '../services/aiService';
+import { analyzeProseChunk, type FullProseDiagnostics } from '../utils/proseAnalyzer';
+import { buildSmartContext, type ContextReport } from '../services/contextBuilder';
 interface CoWriteViewProps {
     entities: Entity[];
     relationships: Relationship[];
@@ -39,16 +40,33 @@ export default function CoWriteView({
     const [conflictResult, setConflictResult] = useState<ConflictResult | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
 
+    // V2: Decoupled Writing State
+    const [isPlanning, setIsPlanning] = useState(false);
+    const [currentBeats, setCurrentBeats] = useState<Array<{ type: string, description: string }>>([]);
+    const [completedBeats, setCompletedBeats] = useState<number>(0);
+    const [liveDiagnostics, setLiveDiagnostics] = useState<FullProseDiagnostics | null>(null);
+    const [draftCritiques, setDraftCritiques] = useState<DraftCritique[]>([]);
+    const [isCritiquing, setIsCritiquing] = useState(false);
+
+    // V3: Smart Context State
+    const [contextReport, setContextReport] = useState<ContextReport | null>(null);
+    const [contextSettings, setContextSettings] = useState({
+        causalChainDepth: 2,
+        characterHistoryDepth: 5,
+        includeScientificConcepts: true
+    });
+    const [showContextInspector, setShowContextInspector] = useState(false);
+
     // Derived data
     const events = entities
-        .filter(e => e.entity_type === 'event')
-        .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+        .filter((e: Entity) => e.entity_type === 'event')
+        .sort((a: Entity, b: Entity) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
 
-    const characters = entities.filter(e => e.entity_type === 'character');
-    const locations = entities.filter(e => e.entity_type === 'location');
-    const themes = entities.filter(e => e.entity_type === 'theme');
+    const characters = entities.filter((e: Entity) => e.entity_type === 'character');
+    const locations = entities.filter((e: Entity) => e.entity_type === 'location');
+    const themes = entities.filter((e: Entity) => e.entity_type === 'theme');
 
-    const selectedEvent = events.find(e => e.id === selectedEventId) || events[0];
+    const selectedEvent = events.find((e: Entity) => e.id === selectedEventId) || events[0];
     const sceneCard = selectedEvent?.properties?.scene_card as SceneCard | undefined;
 
     // Save options to localStorage on change
@@ -69,12 +87,30 @@ export default function CoWriteView({
             const prose = (selectedEvent.properties?.draft_prose as string) || '';
             setDraftText(prose);
             setWordCount(prose.trim() ? prose.trim().split(/\s+/).length : 0);
+
+            // Clear beats when switching events
+            setCurrentBeats((selectedEvent.properties?.scene_beats as any) || []);
+            setCompletedBeats((selectedEvent.properties?.completed_beats as number) || 0);
+            setLiveDiagnostics(analyzeProseChunk(prose));
+            setDraftCritiques([]); // Clear old critiques when changing events
+
+            // Generate smart context on load
+            const report = buildSmartContext({
+                currentEvent: selectedEvent,
+                allEntities: entities,
+                allRelationships: relationships,
+                causalChainDepth: contextSettings.causalChainDepth,
+                characterHistoryDepth: contextSettings.characterHistoryDepth,
+                includeScientificConcepts: contextSettings.includeScientificConcepts
+            });
+            setContextReport(report);
         }
-    }, [selectedEvent?.id]);
+    }, [selectedEvent?.id, entities.length, relationships.length, contextSettings]);
 
     const handleSaveDraft = (text: string) => {
         setDraftText(text);
         setWordCount(text.trim() ? text.trim().split(/\s+/).length : 0);
+        setLiveDiagnostics(analyzeProseChunk(text));
 
         if (selectedEvent) {
             onEntityUpdate(selectedEvent.id, {
@@ -86,56 +122,113 @@ export default function CoWriteView({
         }
     };
 
-    const handleCoWrite = async () => {
+    const handleUpdateBeats = (beats: Array<{ type: string, description: string }>, completed: number) => {
+        setCurrentBeats(beats);
+        setCompletedBeats(completed);
+        if (selectedEvent) {
+            onEntityUpdate(selectedEvent.id, {
+                properties: {
+                    ...selectedEvent.properties,
+                    scene_beats: beats,
+                    completed_beats: completed
+                }
+            });
+        }
+    };
+
+    const handleEditBeat = (index: number, newDescription: string) => {
+        const updated = [...currentBeats];
+        updated[index].description = newDescription;
+        setCurrentBeats(updated);
+        // We defer saving to the parent until they generate prose to avoid too many saves
+    };
+
+    const handleGeneratePlan = async () => {
         if (!selectedEvent) return;
-        setIsWriting(true);
+        setIsPlanning(true);
         setWriteError(null);
 
         try {
-            // Get connected entities via relationships
-            const connectedIds = relationships
-                .filter(r => r.from_entity_id === selectedEvent.id || r.to_entity_id === selectedEvent.id)
-                .map(r => r.from_entity_id === selectedEvent.id ? r.to_entity_id : r.from_entity_id);
+            // 1. Ensure we have a Scene Card first
+            let currentCard = sceneCard;
+            if (!currentCard) {
+                const connectedIds = relationships
+                    .filter((r: Relationship) => r.from_entity_id === selectedEvent.id || r.to_entity_id === selectedEvent.id)
+                    .map((r: Relationship) => r.from_entity_id === selectedEvent.id ? r.to_entity_id : r.from_entity_id);
 
-            const reqChars = characters
-                .filter(c => connectedIds.includes(c.id))
-                .map(c => ({
-                    name: c.name,
-                    description: c.description || '',
-                    voiceSamples: c.properties?.voice_samples as any
-                }));
+                const reqChars = characters.filter((c: Entity) => connectedIds.includes(c.id))
+                    .map((c: Entity) => ({ name: c.name, description: c.description || '' }));
+                const reqLocs = locations.filter((l: Entity) => connectedIds.includes(l.id))
+                    .map((l: Entity) => ({ name: l.name, description: l.description || '' }));
+                const reqThemes = themes.filter((t: Entity) => connectedIds.includes(t.id))
+                    .map((t: Entity) => ({ name: t.name, description: t.description || '' }));
 
-            const reqLocs = locations
-                .filter(l => connectedIds.includes(l.id))
-                .map(l => ({ name: l.name, description: l.description || '' }));
+                const scResult = await generateSceneCard({
+                    eventName: selectedEvent.name,
+                    eventDescription: selectedEvent.description || '',
+                    connectedCharacters: reqChars,
+                    connectedLocations: reqLocs,
+                    connectedThemes: reqThemes,
+                    projectContext
+                });
+                currentCard = scResult.sceneCard;
 
-            const reqThemes = themes
-                .filter(t => connectedIds.includes(t.id))
-                .map(t => ({ name: t.name, description: t.description || '' }));
+                onEntityUpdate(selectedEvent.id, {
+                    properties: { ...selectedEvent.properties, scene_card: currentCard }
+                });
+            }
 
-            const result = await coWriteScene({
-                eventName: selectedEvent.name,
-                eventDescription: selectedEvent.description || '',
-                characters: reqChars,
-                locations: reqLocs,
-                themes: reqThemes,
-                options,
+            // 2. Generate Beats
+            const beats = await suggestBeats({
+                entityName: selectedEvent.name,
+                entityDescription: `${selectedEvent.description || ''}\n\nScene Plan:\nPOV: ${currentCard.pov}\nGoal: ${currentCard.goal}\nConflict: ${currentCard.conflict}`,
                 projectContext
+            }, undefined, contextReport || undefined);
+
+            handleUpdateBeats(beats, 0);
+
+        } catch (err) {
+            setWriteError(err instanceof Error ? err.message : 'Planning failed');
+        } finally {
+            setIsPlanning(false);
+        }
+    };
+
+    const handleWriteNextBeat = async () => {
+        if (!selectedEvent || currentBeats.length === 0 || completedBeats >= currentBeats.length) return;
+
+        setIsWriting(true);
+        setWriteError(null);
+        setDraftCritiques([]);
+
+        try {
+            const beat = currentBeats[completedBeats];
+            const stylePrompt = `Tone: ${options.tone}\nPOV: ${options.pov}\nTense: ${options.tense}\nEmotional Intensity: ${options.emotionalIntensity}`;
+
+            const beatProse = await generateBeatProse({
+                beat,
+                context: {
+                    entityName: selectedEvent.name,
+                    entityDescription: sceneCard ? JSON.stringify(sceneCard) : (selectedEvent.description || ''),
+                    previousProse: draftText.slice(-2000),
+                    projectContext: `${projectContext}\n\nStyle Guide:\n${stylePrompt}`
+                },
+                contextReport: contextReport || undefined
             });
 
-            // Append or replace
-            const newText = draftText ? draftText + '\n\n' + result.prose : result.prose;
+            const newText = draftText ? draftText + '\n\n' + beatProse : beatProse;
             handleSaveDraft(newText);
+            handleUpdateBeats(currentBeats, completedBeats + 1);
 
-            // Also save the generated scene card if we didn't have one
-            if (!sceneCard) {
-                onEntityUpdate(selectedEvent.id, {
-                    properties: {
-                        ...selectedEvent.properties,
-                        draft_prose: newText,
-                        scene_card: result.sceneCard
-                    }
-                });
+            // Run Self-Reflection Critique
+            setIsCritiquing(true);
+            try {
+                const critiques = await analyzeDraftProse(beatProse, beat.description);
+                setDraftCritiques(critiques);
+            } catch (err) {
+                console.warn("Failed to critique draft", err);
+            } finally {
+                setIsCritiquing(false);
             }
 
         } catch (err) {
@@ -145,19 +238,21 @@ export default function CoWriteView({
         }
     };
 
+
+
     const runFullAnalysis = async () => {
         setIsAnalyzing(true);
         try {
-            const reqEvents = events.map(e => ({
+            const reqEvents = events.map((e: Entity) => ({
                 id: e.id,
                 name: e.name,
                 description: e.description || '',
-                charactersInvolved: characters.filter(c =>
-                    relationships.some(r =>
+                charactersInvolved: characters.filter((c: Entity) =>
+                    relationships.some((r: Relationship) =>
                         (r.from_entity_id === e.id && r.to_entity_id === c.id) ||
                         (r.from_entity_id === c.id && r.to_entity_id === e.id)
                     )
-                ).map(c => c.name),
+                ).map((c: Entity) => c.name),
                 emotionLevel: (e.properties?.emotion_level as number) || 0,
                 wordCount: ((e.properties?.draft_prose as string) || '').split(/\s+/).length
             }));
@@ -169,10 +264,10 @@ export default function CoWriteView({
                 }),
                 analyzeThematicThreading({
                     events: reqEvents,
-                    themes: themes.map(t => ({ name: t.name, description: t.description || '' })),
-                    relationships: relationships.map(r => ({
-                        from: entities.find(e => e.id === r.from_entity_id)?.name || '',
-                        to: entities.find(e => e.id === r.to_entity_id)?.name || '',
+                    themes: themes.map((t: Entity) => ({ name: t.name, description: t.description || '' })),
+                    relationships: relationships.map((r: Relationship) => ({
+                        from: entities.find((e: Entity) => e.id === r.from_entity_id)?.name || '',
+                        to: entities.find((e: Entity) => e.id === r.to_entity_id)?.name || '',
                         type: r.relationship_type
                     })),
                     projectName: projectContext || 'Unknown Project'
@@ -208,13 +303,13 @@ export default function CoWriteView({
                 <div className="sidebar-header">
                     <h3>Chapters & Scenes</h3>
                     <span className="total-words">
-                        {events.reduce((acc, e) => acc + (((e.properties?.draft_prose as string) || '').trim().split(/\\s+/).filter(Boolean).length), 0)} words total
+                        {events.reduce((acc: number, e: Entity) => acc + (((e.properties?.draft_prose as string) || '').trim().split(/\s+/).filter(Boolean).length), 0)} words total
                     </span>
                 </div>
                 <div className="event-list">
-                    {events.map((e, idx) => {
+                    {events.map((e: Entity, idx: number) => {
                         const hasProse = !!e.properties?.draft_prose;
-                        const proseWords = hasProse ? (e.properties!.draft_prose as string).trim().split(/\\s+/).filter(Boolean).length : 0;
+                        const proseWords = hasProse ? (e.properties!.draft_prose as string).trim().split(/\s+/).filter(Boolean).length : 0;
                         const isSelected = e.id === (selectedEvent?.id);
 
                         return (
@@ -254,25 +349,174 @@ export default function CoWriteView({
                             </div>
                         )}
 
+                        {currentBeats.length > 0 && (
+                            <div className="beats-panel" style={{ padding: 'var(--space-2)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-2)' }}>
+                                <h4 style={{ margin: '0 0 var(--space-1) 0', fontSize: '12px', color: 'var(--text-secondary)' }}>Scene Beats (Plan)</h4>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    {currentBeats.map((beat, i) => (
+                                        <div key={i} style={{
+                                            display: 'flex', gap: '8px', alignItems: 'center',
+                                            opacity: i < completedBeats ? 0.5 : 1
+                                        }}>
+                                            <span style={{ fontSize: '11px', color: 'var(--accent)', minWidth: '60px' }}>[{beat.type}]</span>
+                                            {i >= completedBeats ? (
+                                                <input
+                                                    type="text"
+                                                    value={beat.description}
+                                                    onChange={(e) => handleEditBeat(i, e.target.value)}
+                                                    style={{
+                                                        flex: 1,
+                                                        background: 'transparent',
+                                                        border: '1px solid var(--border)',
+                                                        color: 'var(--text-primary)',
+                                                        fontSize: '12px',
+                                                        padding: '4px 6px',
+                                                        borderRadius: 'var(--radius-sm)'
+                                                    }}
+                                                />
+                                            ) : (
+                                                <span style={{ fontSize: '12px', textDecoration: 'line-through', flex: 1 }}>{beat.description}</span>
+                                            )}
+                                            {i === completedBeats && <span className="badge" style={{ marginLeft: 'auto', background: 'var(--accent)', color: '#fff' }}>Next</span>}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
                         <div className="editor-container">
                             <textarea
                                 className="draft-editor"
                                 value={draftText}
                                 onChange={(e) => handleSaveDraft(e.target.value)}
-                                placeholder="Start writing, or click ✨ Co-Write to let AI generate the scene for you..."
+                                placeholder="Start writing, or click ✨ Outline Scene to generate a beat-by-beat plan..."
                             />
                         </div>
 
-                        <div className="cowrite-actions">
-                            <button
-                                className={`cowrite-btn ${isWriting ? 'loading' : ''}`}
-                                onClick={handleCoWrite}
-                                disabled={isWriting}
-                            >
-                                {isWriting ? '✍️ Writing...' : '✨ Co-Write This Scene'}
-                            </button>
+                        {liveDiagnostics && liveDiagnostics.wordCount > 50 && (
+                            <div className="live-diagnostics" style={{ marginTop: 'var(--space-2)', display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                                {[liveDiagnostics.purpleProse, liveDiagnostics.senses, liveDiagnostics.monotony, liveDiagnostics.stasis, liveDiagnostics.overusedWords, liveDiagnostics.filterWords]
+                                    .filter(Boolean)
+                                    .map((diag: any, i) => (
+                                        <div key={i} style={{
+                                            padding: '8px 12px',
+                                            background: diag.severity === 'critical' ? 'rgba(239,68,68,0.1)' : diag.severity === 'major' ? 'rgba(245,158,11,0.1)' : 'var(--bg-tertiary)',
+                                            borderLeft: `3px solid ${diag.severity === 'critical' ? 'var(--error)' : diag.severity === 'major' ? '#f59e0b' : 'var(--text-tertiary)'}`,
+                                            borderRadius: 'var(--radius-sm)',
+                                            fontSize: '11px',
+                                            flex: '1 1 45%'
+                                        }}>
+                                            <strong style={{ display: 'block', marginBottom: '2px', color: diag.severity === 'critical' ? 'var(--error)' : diag.severity === 'major' ? '#f59e0b' : 'var(--text-primary)' }}>
+                                                {diag.message}
+                                            </strong>
+                                            <span style={{ color: 'var(--text-secondary)' }}>{diag.fix}</span>
+                                        </div>
+                                    ))}
+                            </div>
+                        )}
+
+                        {isCritiquing && (
+                            <div className="critique-loading" style={{ margin: 'var(--space-2) 0', fontSize: '11px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                                🤖 AI is self-reflecting on the generated beat...
+                            </div>
+                        )}
+
+                        {draftCritiques.length > 0 && (
+                            <div className="draft-critiques" style={{ marginTop: 'var(--space-3)', padding: 'var(--space-2)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                                <h4 style={{ margin: '0 0 var(--space-2) 0', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontSize: '14px' }}>🧐</span> Targeted Revisions
+                                </h4>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                    {draftCritiques.map((critique) => (
+                                        <div key={critique.id} style={{
+                                            padding: '8px 12px',
+                                            background: 'var(--bg-primary)',
+                                            borderLeft: `3px solid ${critique.severity === 'high' ? 'var(--error)' : critique.severity === 'medium' ? '#f59e0b' : 'var(--accent)'}`,
+                                            borderRadius: 'var(--radius-sm)',
+                                            fontSize: '12px',
+                                            display: 'flex',
+                                            justifyContent: 'space-between',
+                                            alignItems: 'center'
+                                        }}>
+                                            <div>
+                                                <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>
+                                                    {critique.message}
+                                                </strong>
+                                                <span style={{ color: 'var(--text-secondary)' }}>{critique.suggestion}</span>
+                                            </div>
+                                            <button
+                                                className="btn btn-secondary"
+                                                style={{ fontSize: '10px', padding: '4px 8px' }}
+                                                onClick={() => {
+                                                    alert(`Auto-fix for "${critique.id}" coming soon. For now, try adding: "${critique.suggestion}" manually.`);
+                                                }}
+                                            >
+                                                ✨ Apply Fix
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="cowrite-actions" style={{ marginTop: 'var(--space-3)' }}>
+                            {currentBeats.length === 0 ? (
+                                <button
+                                    className={`cowrite-btn ${isPlanning ? 'loading' : ''}`}
+                                    onClick={handleGeneratePlan}
+                                    disabled={isPlanning}
+                                >
+                                    {isPlanning ? '🗓️ Planning...' : '🗓️ Outline Scene Beats'}
+                                </button>
+                            ) : completedBeats < currentBeats.length ? (
+                                <button
+                                    className={`cowrite-btn ${isWriting ? 'loading' : ''}`}
+                                    onClick={handleWriteNextBeat}
+                                    disabled={isWriting}
+                                    style={{ background: 'var(--success)' }}
+                                >
+                                    {isWriting ? '✍️ Writing...' : `✨ Co-Write Beat ${completedBeats + 1}`}
+                                </button>
+                            ) : (
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={() => handleUpdateBeats([], 0)}
+                                >
+                                    🔄 Reset Scene Plan
+                                </button>
+                            )}
                             {writeError && <span className="error-text">{writeError}</span>}
                         </div>
+
+                        {/* V3: Context Inspector Preview */}
+                        {contextReport && (
+                            <div className="context-inspector" style={{ marginTop: 'var(--space-4)', padding: 'var(--space-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowContextInspector(!showContextInspector)}>
+                                    <h4 style={{ margin: 0, fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        📋 AI Context Report
+                                        <span className="badge" style={{ background: contextReport.estimatedTokens > 80000 ? 'var(--error)' : 'var(--accent)' }}>
+                                            ~{contextReport.estimatedTokens.toLocaleString()} tokens
+                                        </span>
+                                    </h4>
+                                    <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>{showContextInspector ? '▼ Hide' : '▶ Expand'}</span>
+                                </div>
+
+                                {showContextInspector && (
+                                    <div style={{ marginTop: 'var(--space-2)', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                        <p style={{ margin: '0 0 8px 0', color: 'var(--text-primary)' }}><strong>Included Entities ({contextReport.includedEntities.length}):</strong></p>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                            <div>✓ {contextReport.breakdown.characters} characters</div>
+                                            <div>✓ {contextReport.breakdown.locations} locations</div>
+                                            <div>✓ {contextReport.breakdown.timelines} timelines</div>
+                                            <div>✓ {contextReport.breakdown.events} events</div>
+                                            <div>✓ {contextReport.breakdown.themes} themes</div>
+                                            <div>✓ {contextReport.breakdown.concepts} concepts</div>
+                                        </div>
+                                        <p style={{ margin: '12px 0 0 0', fontStyle: 'italic' }}>Excluded {contextReport.excludedEntities.length} irrelevant entities to save tokens.</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </>
                 )}
             </div>
@@ -280,7 +524,32 @@ export default function CoWriteView({
             {/* RIGHT SIDEBAR: Settings & Health */}
             <div className="cowrite-settings">
                 <div className="settings-section">
-                    <h3>Co-Author Settings</h3>
+                    <h3>Context Engine Settings</h3>
+
+                    <label>
+                        <span>Causal Chain Depth (hops)</span>
+                        <select
+                            value={contextSettings.causalChainDepth}
+                            onChange={e => setContextSettings({ ...contextSettings, causalChainDepth: parseInt(e.target.value) })}
+                        >
+                            <option value={1}>1 hop (Strict)</option>
+                            <option value={2}>2 hops (Recommended)</option>
+                            <option value={3}>3+ hops (Broad)</option>
+                        </select>
+                    </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
+                        <input
+                            type="checkbox"
+                            checked={contextSettings.includeScientificConcepts}
+                            onChange={e => setContextSettings({ ...contextSettings, includeScientificConcepts: e.target.checked })}
+                        />
+                        <span>Include Scientific Concepts</span>
+                    </label>
+                </div>
+
+                <div className="settings-section">
+                    <h3>Co-Author Style Settings</h3>
 
                     <label>
                         <span>Tone</span>
