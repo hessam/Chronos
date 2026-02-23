@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Entity, Relationship } from '../store/appStore';
-import { analyzePacing, analyzeThematicThreading, analyzeConflictEscalation, suggestBeats, generateBeatProse, generateSceneCard, analyzeDraftProse } from '../services/aiService';
+import { analyzePacing, analyzeThematicThreading, analyzeConflictEscalation, suggestBeats, generateBeatProse, generateSceneCard, analyzeDraftProse, reviseBeatProse } from '../services/aiService';
 import type { CoWriteOptions, SceneCard, PacingResult, ThematicResult, ConflictResult, DraftCritique } from '../services/aiService';
 import { analyzeProseChunk, type FullProseDiagnostics } from '../utils/proseAnalyzer';
 import { buildSmartContext, type ContextReport } from '../services/contextBuilder';
@@ -47,6 +47,7 @@ export default function CoWriteView({
     const [liveDiagnostics, setLiveDiagnostics] = useState<FullProseDiagnostics | null>(null);
     const [draftCritiques, setDraftCritiques] = useState<DraftCritique[]>([]);
     const [isCritiquing, setIsCritiquing] = useState(false);
+    const [isFixingId, setIsFixingId] = useState<string | null>(null);
 
     // V3: Smart Context State
     const [contextReport, setContextReport] = useState<ContextReport | null>(null);
@@ -238,7 +239,39 @@ export default function CoWriteView({
         }
     };
 
+    const handleApplyFix = async (critique: DraftCritique) => {
+        if (!selectedEvent || currentBeats.length === 0 || completedBeats === 0) return;
 
+        setIsFixingId(critique.id);
+        setWriteError(null);
+
+        try {
+            // Re-evaluating the last beat generated
+            const beatIndex = completedBeats - 1;
+            const beat = currentBeats[beatIndex];
+
+            // To be safe, we rewrite the last "paragraph" of the draft
+            // If the user has heavily edited it since, this might be tricky, 
+            // but for a smooth prototype we assume the last block of text corresponds to the last beat.
+            const draftParagraphs = draftText.trim().split(/\n\n+/);
+            const lastParagraph = draftParagraphs[draftParagraphs.length - 1];
+
+            const revisedProse = await reviseBeatProse(lastParagraph, beat.description, critique, undefined);
+
+            // Replace the last paragraph with the revised one
+            draftParagraphs[draftParagraphs.length - 1] = revisedProse;
+            const newText = draftParagraphs.join('\n\n');
+
+            handleSaveDraft(newText);
+
+            // Remove this critique since it's addressed
+            setDraftCritiques(prev => prev.filter(c => c.id !== critique.id));
+        } catch (err) {
+            setWriteError(err instanceof Error ? err.message : 'Fix application failed');
+        } finally {
+            setIsFixingId(null);
+        }
+    };
 
     const runFullAnalysis = async () => {
         setIsAnalyzing(true);
@@ -445,13 +478,12 @@ export default function CoWriteView({
                                                 <span style={{ color: 'var(--text-secondary)' }}>{critique.suggestion}</span>
                                             </div>
                                             <button
-                                                className="btn btn-secondary"
+                                                className={`btn btn-secondary ${isFixingId === critique.id ? 'loading' : ''}`}
                                                 style={{ fontSize: '10px', padding: '4px 8px' }}
-                                                onClick={() => {
-                                                    alert(`Auto-fix for "${critique.id}" coming soon. For now, try adding: "${critique.suggestion}" manually.`);
-                                                }}
+                                                onClick={() => handleApplyFix(critique)}
+                                                disabled={isFixingId !== null}
                                             >
-                                                ✨ Apply Fix
+                                                {isFixingId === critique.id ? '✨ Fixing...' : '✨ Apply Fix'}
                                             </button>
                                         </div>
                                     ))}

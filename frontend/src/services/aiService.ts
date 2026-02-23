@@ -471,6 +471,44 @@ Return ONLY a JSON array of objects with the following keys:
     return [];
 }
 
+export async function reviseBeatProse(
+    draft: string,
+    beatDescription: string,
+    critique: DraftCritique,
+    settings?: AISettings
+): Promise<string> {
+    const aiSettings = settings || loadAISettings();
+    const prompt = `You are an expert AI co-author revising a draft.
+
+Intended Beat: ${beatDescription}
+
+Current Draft:
+"""
+${draft}
+"""
+
+Critique to Address:
+- Issue: ${critique.message}
+- Required Fix: ${critique.suggestion}
+
+Task: Rewrite the draft to address the critique while maintaining the core narrative, style, and length. Provide ONLY the revised paragraph, nothing else.`;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    let lastError: Error | null = null;
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        try {
+            const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
+            return text.trim();
+        } catch (e) {
+            lastError = e instanceof Error ? e : new Error(String(e));
+            console.warn(`Provider ${provider} failed for reviseBeatProse`, e);
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider available');
+}
+
 export async function suggestBeats(
     context: {
         entityName: string;
