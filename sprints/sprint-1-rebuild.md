@@ -111,9 +111,9 @@ Done as part of R-03 + R-04 above. The two modes are:
 
 ## Definition of Done
 - [ ] `npm run dev` — both servers start without errors
-- [ ] `npx tsc --noEmit` — zero type errors
-- [ ] No references remain to deleted canvas files
-- [ ] Workspace loads with EventListView as primary tab
+- [x] `npx tsc --noEmit` — zero type errors
+- [x] No references remain to deleted canvas files
+- [x] Workspace loads with EventListView as primary tab
 - [ ] Sidebar has exactly 3 panels
-- [ ] AI calls use Anthropic by default
+- [x] AI calls use Anthropic by default
 - [ ] **All existing DB data is untouched and accessible**

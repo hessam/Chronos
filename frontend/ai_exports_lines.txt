@@ -1,0 +1,59 @@
+4:export type AIProvider = 'openai' | 'anthropic' | 'google';
+6:export interface AIModel {
+14:export const AI_MODELS: AIModel[] = [
+27:export const PROVIDER_LABELS: Record<AIProvider, string> = {
+33:export const PROVIDER_COLORS: Record<AIProvider, string> = {
+79:export interface AISettings {
+87:export function loadAISettings(): AISettings {
+99:export function saveAISettings(settings: AISettings): void {
+121:export interface GenerateIdeasRequest {
+130:export interface GeneratedIdea {
+137:export interface GenerateIdeasResult {
+352:export interface AgenticProseRequest {
+361:export interface AgenticProseResult {
+490:export interface GenerateBeatProseRequest {
+568:export interface DraftCritique {
+752:export function getModelsForProvider(provider: AIProvider): AIModel[] {
+757:export function hasConfiguredProvider(settings?: AISettings): boolean {
+764:export type IssueSeverity = 'error' | 'warning' | 'suggestion';
+765:export type IssueCategory = 'timeline_paradox' | 'character_conflict' | 'causality_break' | 'logic_gap';
+767:export interface ConsistencyIssue {
+777:export interface ConsistencyReport {
+786:export interface CheckConsistencyRequest {
+1061:export type ImpactLevel = 'high' | 'medium' | 'low';
+1063:export interface RippleEffect {
+1071:export interface RippleReport {
+1079:export interface AnalyzeRippleRequest {
+1095:export const IMPACT_ICONS: Record<ImpactLevel, string> = {
+1251:export interface SceneCard {
+1260:export interface SceneCardResult {
+1267:export interface GenerateSceneRequest {
+1385:export interface NarrativeStep {
+1392:export interface NarrativeSequenceResult {
+1399:export interface BuildSequenceRequest {
+1504:export interface MissingScene {
+1513:export interface MissingSceneResult {
+1520:export interface DetectGapsRequest {
+1649:export interface VoiceSample {
+1654:export interface VoiceSampleResult {
+1661:export interface GenerateVoiceRequest {
+1767:export interface WikiExportRequest {
+1773:export function generateWikiMarkdown(req: WikiExportRequest): string {
+1842:export interface POVAnalysisRequest {
+1852:export interface POVIssue {
+1861:export interface POVAnalysisResult {
+1986:export interface ChapterAssemblyRequest {
+2008:export interface ChapterBlueprint {
+2018:export interface ChapterAssemblyResult {
+2138:export interface TemporalGap {
+2149:export function analyzeTemporalGaps(
+2207:export interface CoWriteOptions {
+2219:export interface CoWriteRequest {
+2229:export interface CoWriteResult {
+2301:export interface PacingPacingEvent {
+2308:export interface PacingRequest {
+2313:export interface PacingResult {
+2368:export interface ThematicRequest {
+2375:export interface ThematicResult {
+2440:export interface ConflictRequest {
+2445:export interface ConflictResult {
