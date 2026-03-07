@@ -1,8 +1,9 @@
-import { useState, FormEvent } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAuthStore } from '../store/authStore';
+import ProjectWizard from '../components/ProjectWizard';
 
 
 export default function ProjectsPage() {
@@ -12,9 +13,6 @@ export default function ProjectsPage() {
     const queryClient = useQueryClient();
 
     const [showCreate, setShowCreate] = useState(false);
-    const [name, setName] = useState('');
-    const [description, setDescription] = useState('');
-    const [error, setError] = useState('');
 
     // Fetch projects
     const { data, isLoading } = useQuery({
@@ -22,31 +20,11 @@ export default function ProjectsPage() {
         queryFn: () => api.getProjects(),
     });
 
-    // Create project
-    const createMutation = useMutation({
-        mutationFn: (body: { name: string; description: string }) =>
-            api.createProject(body),
-        onSuccess: (data) => {
-            queryClient.invalidateQueries({ queryKey: ['projects'] });
-            setShowCreate(false);
-            setName('');
-            setDescription('');
-            navigate(`/project/${data.project.id}`);
-        },
-        onError: (err: Error) => setError(err.message),
-    });
-
     // Delete project
     const deleteMutation = useMutation({
         mutationFn: (id: string) => api.deleteProject(id),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
     });
-
-    function handleCreate(e: FormEvent) {
-        e.preventDefault();
-        if (!name.trim()) return;
-        createMutation.mutate({ name: name.trim(), description: description.trim() });
-    }
 
     const projects = data?.projects || [];
 
@@ -66,43 +44,8 @@ export default function ProjectsPage() {
                 </div>
             </div>
 
-            {/* Create Project Modal */}
-            {showCreate && (
-                <div className="modal-overlay" onClick={() => setShowCreate(false)}>
-                    <div className="modal" onClick={(e) => e.stopPropagation()}>
-                        <h2 className="modal-title">Create New Project</h2>
-                        {error && <p className="error-text" style={{ marginBottom: 'var(--space-2)' }}>{error}</p>}
-                        <form onSubmit={handleCreate}>
-                            <div className="form-group">
-                                <label className="label">Project Name</label>
-                                <input
-                                    className="input"
-                                    value={name}
-                                    onChange={(e) => setName(e.target.value)}
-                                    placeholder="My Sci-Fi Epic"
-                                    required
-                                    autoFocus
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label className="label">Description (optional)</label>
-                                <textarea
-                                    className="textarea"
-                                    value={description}
-                                    onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="A multi-timeline saga about..."
-                                />
-                            </div>
-                            <div className="modal-actions">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
-                                <button type="submit" className="btn btn-primary" disabled={createMutation.isPending}>
-                                    {createMutation.isPending ? 'Creating...' : 'Create Project'}
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
+            {/* Project Setup Wizard */}
+            {showCreate && <ProjectWizard onClose={() => setShowCreate(false)} />}
 
             {/* Projects Grid */}
             {isLoading ? (

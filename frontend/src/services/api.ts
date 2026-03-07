@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Project, Entity, TimelineVariant } from '../store/appStore';
+import type { Project, Entity, TimelineVariant, Conversation, ProseDraft, StyleProfile, Issue } from '../store/appStore';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -387,5 +387,186 @@ export const api = {
             .single();
         if (error) throw new Error(error.message);
         return { entity: data as Entity };
+    },
+
+    // ─── Conversations ────────────────────────────────────────
+    async getConversations(projectId: string): Promise<{ conversations: Conversation[] }> {
+        const { data, error } = await supabase
+            .from('conversations')
+            .select('*')
+            .eq('project_id', projectId)
+            .order('updated_at', { ascending: false });
+        if (error) throw new Error(error.message);
+        return { conversations: (data || []) as Conversation[] };
+    },
+
+    async createConversation(projectId: string, body: {
+        title?: string;
+        context_entity_id?: string | null;
+        messages?: Conversation['messages'];
+    }): Promise<{ conversation: Conversation }> {
+        const { data, error } = await supabase
+            .from('conversations')
+            .insert({ ...body, project_id: projectId })
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { conversation: data as Conversation };
+    },
+
+    async updateConversation(id: string, body: Partial<{
+        title: string;
+        messages: Conversation['messages'];
+        metadata: Record<string, unknown>;
+    }>): Promise<{ conversation: Conversation }> {
+        const { data, error } = await supabase
+            .from('conversations')
+            .update(body)
+            .eq('id', id)
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { conversation: data as Conversation };
+    },
+
+    async deleteConversation(id: string): Promise<void> {
+        const { error } = await supabase
+            .from('conversations')
+            .delete()
+            .eq('id', id);
+        if (error) throw new Error(error.message);
+    },
+
+    // ─── Prose Drafts ─────────────────────────────────────────
+    async getProseDrafts(entityId: string): Promise<{ drafts: ProseDraft[] }> {
+        const { data, error } = await supabase
+            .from('prose_drafts')
+            .select('*')
+            .eq('entity_id', entityId)
+            .order('version', { ascending: false });
+        if (error) throw new Error(error.message);
+        return { drafts: (data || []) as ProseDraft[] };
+    },
+
+    async createProseDraft(projectId: string, body: {
+        entity_id: string;
+        content: string;
+        word_count: number;
+        status?: ProseDraft['status'];
+        ai_feedback?: string;
+        style_scores?: Record<string, unknown>;
+    }): Promise<{ draft: ProseDraft }> {
+        // Auto-increment version
+        const { data: latest } = await supabase
+            .from('prose_drafts')
+            .select('version')
+            .eq('entity_id', body.entity_id)
+            .order('version', { ascending: false })
+            .limit(1)
+            .single();
+        const nextVersion = ((latest?.version as number) || 0) + 1;
+
+        const { data, error } = await supabase
+            .from('prose_drafts')
+            .insert({ ...body, project_id: projectId, version: nextVersion })
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { draft: data as ProseDraft };
+    },
+
+    async updateProseDraft(id: string, body: Partial<{
+        content: string;
+        word_count: number;
+        status: ProseDraft['status'];
+        ai_feedback: string;
+    }>): Promise<{ draft: ProseDraft }> {
+        const { data, error } = await supabase
+            .from('prose_drafts')
+            .update(body)
+            .eq('id', id)
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { draft: data as ProseDraft };
+    },
+
+    // ─── Style Profiles ──────────────────────────────────────
+    async getStyleProfile(projectId: string): Promise<{ profile: StyleProfile | null }> {
+        const { data, error } = await supabase
+            .from('style_profiles')
+            .select('*')
+            .eq('project_id', projectId)
+            .limit(1)
+            .single();
+        if (error && error.code !== 'PGRST116') throw new Error(error.message);
+        return { profile: (data as StyleProfile) || null };
+    },
+
+    async upsertStyleProfile(projectId: string, preferences: Record<string, unknown>): Promise<{ profile: StyleProfile }> {
+        const { data, error } = await supabase
+            .from('style_profiles')
+            .upsert(
+                { project_id: projectId, profile_name: 'Default', preferences },
+                { onConflict: 'project_id,profile_name' }
+            )
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { profile: data as StyleProfile };
+    },
+
+    // ─── Issues ───────────────────────────────────────────────
+    async getIssues(projectId: string, opts?: { resolved?: boolean }): Promise<{ issues: Issue[] }> {
+        let query = supabase
+            .from('issues')
+            .select('*')
+            .eq('project_id', projectId)
+            .order('created_at', { ascending: false });
+
+        if (opts?.resolved !== undefined) {
+            query = query.eq('resolved', opts.resolved);
+        }
+
+        const { data, error } = await query;
+        if (error) throw new Error(error.message);
+        return { issues: (data || []) as Issue[] };
+    },
+
+    async createIssue(projectId: string, body: {
+        entity_id?: string;
+        related_entity_id?: string;
+        issue_type: Issue['issue_type'];
+        severity?: Issue['severity'];
+        title: string;
+        description?: string;
+        suggestion?: string;
+    }): Promise<{ issue: Issue }> {
+        const { data, error } = await supabase
+            .from('issues')
+            .insert({ ...body, project_id: projectId })
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { issue: data as Issue };
+    },
+
+    async resolveIssue(id: string): Promise<{ issue: Issue }> {
+        const { data, error } = await supabase
+            .from('issues')
+            .update({ resolved: true, resolved_at: new Date().toISOString() })
+            .eq('id', id)
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return { issue: data as Issue };
+    },
+
+    async deleteIssue(id: string): Promise<void> {
+        const { error } = await supabase
+            .from('issues')
+            .delete()
+            .eq('id', id);
+        if (error) throw new Error(error.message);
     },
 };

@@ -58,6 +58,63 @@ export interface Beat {
     status: 'draft' | 'revised' | 'final';
 }
 
+// ─── Sprint 2: Intelligence Layer Types ───────────────────────
+
+export interface ConversationMessage {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    timestamp: string;
+}
+
+export interface Conversation {
+    id: string;
+    project_id: string;
+    title: string;
+    context_entity_id: string | null;
+    messages: ConversationMessage[];
+    metadata: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ProseDraft {
+    id: string;
+    entity_id: string;
+    project_id: string;
+    version: number;
+    content: string;
+    word_count: number;
+    status: 'draft' | 'revised' | 'accepted' | 'rejected';
+    ai_feedback: string | null;
+    style_scores: Record<string, unknown>;
+    created_at: string;
+}
+
+export interface StyleProfile {
+    id: string;
+    project_id: string;
+    profile_name: string;
+    preferences: Record<string, unknown>;
+    learned_from: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface Issue {
+    id: string;
+    project_id: string;
+    entity_id: string | null;
+    related_entity_id: string | null;
+    issue_type: 'contradiction' | 'causality' | 'pov' | 'pacing' | 'arc' | 'continuity' | 'other';
+    severity: 'info' | 'warning' | 'error';
+    title: string;
+    description: string;
+    suggestion: string;
+    resolved: boolean;
+    resolved_at: string | null;
+    created_at: string;
+}
+
 // Resolve an entity with timeline-specific overrides
 export function resolveEntity(entity: Entity, timelineId: string | null, variants: TimelineVariant[]): Entity {
     if (!timelineId) return entity;
