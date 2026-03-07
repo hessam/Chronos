@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo, FormEvent } from 'react';
+import { useEffect, useState, useRef, FormEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -7,13 +7,10 @@ import EventListView from '../components/EventListView';
 import { useAppStore, resolveEntity } from '../store/appStore';
 import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
-// Canvas components removed (R-01 Sprint 1)
-import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
-import type { GeneratedIdea, GenerateIdeasResult, GenerateIdeasRequest, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
+
 import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
 
-import { BeatSequencer } from '../components/BeatSequencer';
 import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 const ENTITY_ICONS: Record<string, string> = {
@@ -54,13 +51,11 @@ export default function WorkspacePage() {
     const {
         currentProject, setCurrentProject,
         selectedEntity, setSelectedEntity,
-        entityFilter, setEntityFilter,
+        entityFilter,
         contextPanelOpen,
         focusedTimelineId, setFocusedTimelineId,
-        activeUsers, setActiveUsers,
     } = useAppStore();
 
-    const [searchQuery, setSearchQuery] = useState('');
     const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
     const [globalSearchQuery, setGlobalSearchQuery] = useState('');
     const globalSearchRef = useRef<HTMLInputElement>(null);
@@ -105,23 +100,13 @@ export default function WorkspacePage() {
     useEffect(() => {
         const defaults = TYPE_DEFAULT_FIELDS[newEntityType] || [];
         setNewEntityStructuredProps(defaults.map(d => ({ key: d.key, value: '' })));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [newEntityType]);
 
     // AI State
-    const [aiIdeasCache, setAiIdeasCache] = useState<Record<string, GeneratedIdea[]>>({});
-    const [aiLoading, setAiLoading] = useState(false);
-    const [aiError, setAiError] = useState<string | null>(null);
-    const [aiResult, setAiResult] = useState<GenerateIdeasResult | null>(null);
 
     // Derived AI ideas for current entity
-    const aiIdeas = (selectedEntity && aiIdeasCache[selectedEntity.id]) || [];
 
     // Reset AI error/result when switching entities (but keep ideas in cache)
-    useEffect(() => {
-        setAiResult(null);
-        setAiError(null);
-    }, [selectedEntity?.id]);
 
     // Entity editing
     const [editingField, setEditingField] = useState<string | null>(null);
@@ -140,7 +125,6 @@ export default function WorkspacePage() {
     // Consistency checking state (E3-US4)
 
     // Ripple effect analysis state (E3-US5)
-    const [pendingSaveField, setPendingSaveField] = useState<string | null>(null);
 
     // Scene Card Generator state
 
@@ -219,10 +203,10 @@ export default function WorkspacePage() {
             user.id,
             user.user_metadata?.full_name || user.email || 'User',
             user.email || '',
-            setActiveUsers
+            () => { } // presence updates not displayed in new sidebar
         );
         return () => stopPresence();
-    }, [projectId, user, setActiveUsers]);
+    }, [projectId, user]);
 
     // Broadcast editing entity for presence
     useEffect(() => {
@@ -278,15 +262,6 @@ export default function WorkspacePage() {
     }, [allEntitiesData, selectedEntity, setSelectedEntity]);
 
     // Filtered for sidebar
-    const entityQueryKey = ['entities', projectId, entityFilter, searchQuery];
-    const { data: entitiesData, isLoading: entitiesLoading } = useQuery({
-        queryKey: entityQueryKey,
-        queryFn: () => api.getEntities(projectId!, {
-            type: entityFilter !== 'all' ? entityFilter : undefined,
-            search: searchQuery || undefined,
-        }),
-        enabled: !!projectId,
-    });
 
     // Fetch all variants for this project (batch load for canvas indicators + focus mode)
     const { data: variantsData } = useQuery({
@@ -410,54 +385,8 @@ export default function WorkspacePage() {
     const handleSaveField = async (field: string) => {
         if (!selectedEntity) return;
 
-        // Only intercept description changes when AI is configured
-        if (field === 'description' && aiConfigured && editDescVal !== (selectedEntity.description || '')) {
-            setPendingSaveField(field);
-            setIsAnalyzingRipple(true);
-            setRippleError(null);
-            setRippleReport(null);
-            setShowRippleModal(true);
-
-            try {
-                // Get related entities using graph traversal
-                const { entities: related, paths } = await api.getRelatedEntities(
-                    selectedEntity.id, 2, projectId
-                );
-
-                // Build relationship type map
-                const relMap: Record<string, string> = {};
-                for (const p of paths) {
-                    if (p.from === selectedEntity.id) relMap[p.to] = p.type;
-                    if (p.to === selectedEntity.id) relMap[p.from] = p.type;
-                }
-
-                const report = await analyzeRippleEffects({
-                    editedEntity: {
-                        name: selectedEntity.name,
-                        type: selectedEntity.entity_type,
-                        descriptionBefore: selectedEntity.description || '',
-                        descriptionAfter: editDescVal,
-                    },
-                    relatedEntities: related.map(e => ({
-                        name: e.name,
-                        type: e.entity_type,
-                        description: e.description || '',
-                        relationshipType: relMap[e.id] || 'related',
-                    })),
-                    projectName: currentProject?.name || 'Unknown',
-                });
-
-                setRippleReport(report);
-            } catch (err) {
-                const msg = err instanceof Error ? err.message : 'Analysis failed';
-                setRippleError(msg);
-            } finally {
-                setIsAnalyzingRipple(false);
-            }
-        } else {
-            // No interception needed — save directly
-            commitSave(field);
-        }
+        // No interception needed — save directly
+        commitSave(field);
     };
 
 
@@ -475,42 +404,18 @@ export default function WorkspacePage() {
 
 
 
-    // Save AI idea as Note entity
-    const saveIdeaAsNote = (idea: GeneratedIdea) => {
-        createEntity.mutate({
-            entity_type: 'note',
-            name: idea.title,
-            description: idea.description,
-            properties: { source: 'ai_generated', confidence: idea.confidence },
-        });
-    };
 
-    // Scene Card Generator handler
 
-    // Save manually edited scene card field
 
-    // Load saved data when selecting an entity
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => {
         const props = selectedEntity?.properties as Record<string, unknown> | undefined;
-        // Scene card (events only)
+        // Emotion level (events only)
         if (selectedEntity?.entity_type === 'event' && props) {
-            setSceneCard((props.scene_card as SceneCard) || null);
             setEmotionLevel(typeof props.emotion_level === 'number' ? props.emotion_level : 0);
         } else {
-            setSceneCard(null);
             setEmotionLevel(0);
         }
-        // Voice samples (characters only)
-        if (selectedEntity?.entity_type === 'character' && props) {
-            setVoiceSamples((props.voice_samples as VoiceSample[]) || []);
-        } else {
-            setVoiceSamples([]);
-        }
-        setSceneError(null);
-        setVoiceError(null);
-        setEditingSceneField(null);
-        setEditingVoiceIdx(null);
     }, [selectedEntity?.id]);
 
     // Close tools menu on click outside
@@ -614,14 +519,11 @@ export default function WorkspacePage() {
     }
 
 
-    // AI consistency checking (E3-US4)
 
-    // Navigate to entity by name (for consistency report)
 
     const allEntities = allEntitiesData?.entities || [];
     const allVariants = variantsData?.variants || [];
     const entityVariants = entityVariantsData?.variants || [];
-    const aiConfigured = hasConfiguredProvider();
 
     // When a timeline is focused, filter sidebar to show related entities
 
@@ -839,7 +741,7 @@ export default function WorkspacePage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
                                 <button
                                     className="btn btn-ghost btn-sm"
-                                    onClick={() => { setSelectedEntity(null); setAiError(null); }}
+                                    onClick={() => { setSelectedEntity(null); }}
                                     title="Back to canvas"
                                 >← Canvas</button>
                                 <span style={{ fontSize: 32 }}>{ENTITY_ICONS[selectedEntity.entity_type]}</span>
@@ -1161,123 +1063,6 @@ export default function WorkspacePage() {
                                         )}
                                     </div>
 
-                                    {/* AI Idea Generation (E3-US3) */}
-                                    <div style={{
-                                        marginTop: 'var(--space-3)',
-                                        padding: 'var(--space-3)',
-                                        background: 'linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.06))',
-                                        borderRadius: 'var(--radius-lg)',
-                                        border: '1px solid rgba(99,102,241,0.15)',
-                                    }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
-                                            <h3 style={{ fontSize: 'var(--text-md)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                🧠 AI Ideas
-                                            </h3>
-                                            <button
-                                                className="btn btn-primary btn-sm"
-                                                onClick={handleGenerateIdeas}
-                                                disabled={aiLoading}
-                                                style={{ gap: 6 }}
-                                            >
-                                                {aiLoading ? (
-                                                    <><div className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Thinking...</>
-                                                ) : '✨ Generate Ideas'}
-                                            </button>
-                                        </div>
-
-                                        {!aiConfigured && !aiLoading && aiIdeas.length === 0 && (
-                                            <div style={{
-                                                padding: 'var(--space-2)',
-                                                background: 'var(--warning-muted)',
-                                                borderRadius: 'var(--radius-md)',
-                                                fontSize: 'var(--text-sm)',
-                                                color: 'var(--warning)',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: 8,
-                                            }}>
-                                                ⚠️ No API key configured.{' '}
-                                                <button
-                                                    className="btn btn-ghost btn-sm"
-                                                    onClick={() => navigate('/settings')}
-                                                    style={{ color: 'var(--accent)', fontSize: 'var(--text-sm)', padding: '2px 8px', height: 'auto' }}
-                                                >
-                                                    Go to Settings →
-                                                </button>
-                                            </div>
-                                        )}
-
-                                        {aiError && (
-                                            <div style={{
-                                                padding: 'var(--space-2)',
-                                                background: 'var(--error-muted)',
-                                                borderRadius: 'var(--radius-md)',
-                                                fontSize: 'var(--text-sm)',
-                                                color: 'var(--error)',
-                                            }}>
-                                                {aiError}
-                                            </div>
-                                        )}
-
-                                        {aiIdeas.length > 0 && (
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
-                                                {aiResult && (
-                                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginBottom: 4 }}>
-                                                        Generated by {aiResult.provider}/{aiResult.model} {aiResult.cached ? '(cached)' : ''}
-                                                    </div>
-                                                )}
-                                                {aiIdeas.map((idea) => (
-                                                    <div
-                                                        key={idea.id}
-                                                        style={{
-                                                            padding: 'var(--space-2)',
-                                                            background: 'var(--bg-secondary)',
-                                                            borderRadius: 'var(--radius-md)',
-                                                            border: '1px solid var(--border)',
-                                                        }}
-                                                    >
-                                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                                                            <strong style={{ fontSize: 'var(--text-base)' }}>{idea.title}</strong>
-                                                            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                                                                <span style={{
-                                                                    fontSize: 'var(--text-xs)',
-                                                                    padding: '2px 6px',
-                                                                    borderRadius: 'var(--radius-full)',
-                                                                    background: idea.confidence > 0.8 ? 'var(--success-muted)' : idea.confidence > 0.5 ? 'var(--warning-muted)' : 'var(--error-muted)',
-                                                                    color: idea.confidence > 0.8 ? 'var(--success)' : idea.confidence > 0.5 ? 'var(--warning)' : 'var(--error)',
-                                                                }}>
-                                                                    {Math.round(idea.confidence * 100)}%
-                                                                </span>
-                                                                <button
-                                                                    className="btn btn-ghost btn-sm"
-                                                                    onClick={() => navigator.clipboard.writeText(`${idea.title}\n${idea.description}`)}
-                                                                    title="Copy"
-                                                                    style={{ padding: '2px 6px', height: 'auto', fontSize: 12 }}
-                                                                >📋</button>
-                                                                <button
-                                                                    className="btn btn-ghost btn-sm"
-                                                                    onClick={() => saveIdeaAsNote(idea)}
-                                                                    title="Save as Note"
-                                                                    style={{ padding: '2px 6px', height: 'auto', fontSize: 12 }}
-                                                                >💾</button>
-                                                            </div>
-                                                        </div>
-                                                        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                                                            {idea.description}
-                                                        </p>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        {aiConfigured && !aiLoading && aiIdeas.length === 0 && !aiError && (
-                                            <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
-                                                Click "Generate Ideas" to get AI-powered plot suggestions based on this {selectedEntity.entity_type}.
-                                            </p>
-                                        )}
-                                    </div>
-
-                                    {/* Metadata */}
                                     <div style={{ marginTop: 'var(--space-3)', padding: 'var(--space-2)', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
                                         <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>
                                             Created: {new Date(selectedEntity.created_at).toLocaleString()} • Updated: {new Date(selectedEntity.updated_at).toLocaleString()}
@@ -1448,16 +1233,6 @@ export default function WorkspacePage() {
                                 </div>
                             )}
 
-                            {/* ─── Relationships Tab (Sprint 4) ─── */}
-                            {activeDetailTab === 'beats' && selectedEntity.entity_type === 'event' && (
-                                <div style={{ height: 'calc(100vh - 200px)' }}> {/* Constrain height for scrolling */}
-                                    <BeatSequencer
-                                        entity={selectedEntity}
-                                        projectDescription={currentProject?.description || ''}
-                                        onUpdate={(updates: any) => updateEntity.mutate({ id: selectedEntity.id, body: updates })}
-                                    />
-                                </div>
-                            )}
                             {activeDetailTab === 'relationships' && (
                                 <div>
                                     <div style={{
@@ -1858,328 +1633,335 @@ export default function WorkspacePage() {
 
                     </div>
                 </aside>
-            )}
+            )
+            }
 
             {/* Create Entity Modal */}
-            {showCreateEntity && (
-                <div className="modal-overlay" onClick={() => setShowCreateEntity(false)}>
-                    <div className="modal" onClick={(e) => e.stopPropagation()}>
-                        <h2 className="modal-title">Create New Entity</h2>
-                        <form onSubmit={handleCreateEntity}>
-                            <div className="form-group">
-                                <label className="label">Type</label>
-                                <select
-                                    className="input"
-                                    value={newEntityType}
-                                    onChange={(e) => setNewEntityType(e.target.value as Entity['entity_type'])}
-                                >
-                                    {Object.entries(ENTITY_LABELS).map(([type, label]) => (
-                                        <option key={type} value={type}>{ENTITY_ICONS[type]} {label.slice(0, -1)}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div className="form-group">
-                                <label className="label">Name</label>
-                                <input
-                                    className="input"
-                                    value={newEntityName}
-                                    onChange={(e) => setNewEntityName(e.target.value)}
-                                    placeholder={
-                                        newEntityType === 'character' ? 'Alice' :
-                                            newEntityType === 'timeline' ? 'Primary Reality' :
-                                                newEntityType === 'event' ? 'The Great Betrayal' :
-                                                    newEntityType === 'arc' ? 'Hero\'s Journey' :
-                                                        newEntityType === 'theme' ? 'Redemption' :
-                                                            newEntityType === 'location' ? 'Crystal Palace' :
-                                                                'My Note'
-                                    }
-                                    required
-                                    autoFocus
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label className="label">Description</label>
-                                <textarea
-                                    className="textarea"
-                                    value={newEntityDesc}
-                                    onChange={(e) => setNewEntityDesc(e.target.value)}
-                                    placeholder="Describe this entity..."
-                                />
-                            </div>
-                            {/* ─── Type-Aware Properties ─── */}
-                            <div className="form-group">
-                                <label className="label">Properties</label>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                    {newEntityStructuredProps.map((prop, i) => (
-                                        <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                                            <input
-                                                className="input"
-                                                value={prop.key}
-                                                onChange={(e) => {
-                                                    const next = [...newEntityStructuredProps];
-                                                    next[i] = { ...next[i], key: e.target.value };
-                                                    setNewEntityStructuredProps(next);
-                                                }}
-                                                placeholder="key"
-                                                style={{ width: 110, flexShrink: 0, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
-                                            />
-                                            <input
-                                                className="input"
-                                                value={prop.value}
-                                                onChange={(e) => {
-                                                    const next = [...newEntityStructuredProps];
-                                                    next[i] = { ...next[i], value: e.target.value };
-                                                    setNewEntityStructuredProps(next);
-                                                }}
-                                                placeholder={(TYPE_DEFAULT_FIELDS[newEntityType] || []).find(d => d.key === prop.key)?.placeholder || 'value'}
-                                                style={{ flex: 1, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
-                                            />
-                                            <button
-                                                type="button"
-                                                onClick={() => setNewEntityStructuredProps(prev => prev.filter((_, j) => j !== i))}
-                                                style={{
-                                                    background: 'none', border: 'none', cursor: 'pointer',
-                                                    color: 'var(--text-tertiary)', fontSize: 14, padding: '2px 4px',
-                                                    flexShrink: 0,
-                                                }}
-                                                title="Remove"
-                                            >✕</button>
-                                        </div>
-                                    ))}
-                                    <button
-                                        type="button"
-                                        onClick={() => setNewEntityStructuredProps(prev => [...prev, { key: '', value: '' }])}
-                                        style={{
-                                            padding: '6px', background: 'none',
-                                            border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)',
-                                            cursor: 'pointer', color: 'var(--text-tertiary)',
-                                            fontSize: 'var(--text-sm)', transition: 'all 0.15s',
-                                        }}
-                                        onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; }}
-                                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+            {
+                showCreateEntity && (
+                    <div className="modal-overlay" onClick={() => setShowCreateEntity(false)}>
+                        <div className="modal" onClick={(e) => e.stopPropagation()}>
+                            <h2 className="modal-title">Create New Entity</h2>
+                            <form onSubmit={handleCreateEntity}>
+                                <div className="form-group">
+                                    <label className="label">Type</label>
+                                    <select
+                                        className="input"
+                                        value={newEntityType}
+                                        onChange={(e) => setNewEntityType(e.target.value as Entity['entity_type'])}
                                     >
-                                        + Add Field
+                                        {Object.entries(ENTITY_LABELS).map(([type, label]) => (
+                                            <option key={type} value={type}>{ENTITY_ICONS[type]} {label.slice(0, -1)}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label className="label">Name</label>
+                                    <input
+                                        className="input"
+                                        value={newEntityName}
+                                        onChange={(e) => setNewEntityName(e.target.value)}
+                                        placeholder={
+                                            newEntityType === 'character' ? 'Alice' :
+                                                newEntityType === 'timeline' ? 'Primary Reality' :
+                                                    newEntityType === 'event' ? 'The Great Betrayal' :
+                                                        newEntityType === 'arc' ? 'Hero\'s Journey' :
+                                                            newEntityType === 'theme' ? 'Redemption' :
+                                                                newEntityType === 'location' ? 'Crystal Palace' :
+                                                                    'My Note'
+                                        }
+                                        required
+                                        autoFocus
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label className="label">Description</label>
+                                    <textarea
+                                        className="textarea"
+                                        value={newEntityDesc}
+                                        onChange={(e) => setNewEntityDesc(e.target.value)}
+                                        placeholder="Describe this entity..."
+                                    />
+                                </div>
+                                {/* ─── Type-Aware Properties ─── */}
+                                <div className="form-group">
+                                    <label className="label">Properties</label>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        {newEntityStructuredProps.map((prop, i) => (
+                                            <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                                <input
+                                                    className="input"
+                                                    value={prop.key}
+                                                    onChange={(e) => {
+                                                        const next = [...newEntityStructuredProps];
+                                                        next[i] = { ...next[i], key: e.target.value };
+                                                        setNewEntityStructuredProps(next);
+                                                    }}
+                                                    placeholder="key"
+                                                    style={{ width: 110, flexShrink: 0, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
+                                                />
+                                                <input
+                                                    className="input"
+                                                    value={prop.value}
+                                                    onChange={(e) => {
+                                                        const next = [...newEntityStructuredProps];
+                                                        next[i] = { ...next[i], value: e.target.value };
+                                                        setNewEntityStructuredProps(next);
+                                                    }}
+                                                    placeholder={(TYPE_DEFAULT_FIELDS[newEntityType] || []).find(d => d.key === prop.key)?.placeholder || 'value'}
+                                                    style={{ flex: 1, fontSize: 'var(--text-sm)', padding: '4px 8px', height: 32 }}
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setNewEntityStructuredProps(prev => prev.filter((_, j) => j !== i))}
+                                                    style={{
+                                                        background: 'none', border: 'none', cursor: 'pointer',
+                                                        color: 'var(--text-tertiary)', fontSize: 14, padding: '2px 4px',
+                                                        flexShrink: 0,
+                                                    }}
+                                                    title="Remove"
+                                                >✕</button>
+                                            </div>
+                                        ))}
+                                        <button
+                                            type="button"
+                                            onClick={() => setNewEntityStructuredProps(prev => [...prev, { key: '', value: '' }])}
+                                            style={{
+                                                padding: '6px', background: 'none',
+                                                border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)',
+                                                cursor: 'pointer', color: 'var(--text-tertiary)',
+                                                fontSize: 'var(--text-sm)', transition: 'all 0.15s',
+                                            }}
+                                            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; }}
+                                            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+                                        >
+                                            + Add Field
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="modal-actions">
+                                    <button type="button" className="btn btn-secondary" onClick={() => setShowCreateEntity(false)}>Cancel</button>
+                                    <button type="submit" className="btn btn-primary" disabled={createEntity.isPending}>
+                                        {createEntity.isPending ? 'Creating...' : `Create ${ENTITY_LABELS[newEntityType]?.slice(0, -1) || 'Entity'}`}
                                     </button>
                                 </div>
-                            </div>
-                            <div className="modal-actions">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowCreateEntity(false)}>Cancel</button>
-                                <button type="submit" className="btn btn-primary" disabled={createEntity.isPending}>
-                                    {createEntity.isPending ? 'Creating...' : `Create ${ENTITY_LABELS[newEntityType]?.slice(0, -1) || 'Entity'}`}
-                                </button>
-                            </div>
-                        </form>
+                            </form>
+                        </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
             {/* ─── Create Relationship Modal (Sprint 4) ─── */}
-            {showCreateRelModal && (
-                <div className="modal-backdrop" onClick={() => setShowCreateRelModal(false)}>
-                    <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
-                        <h3 style={{ marginBottom: 'var(--space-3)' }}>🔗 Create Relationship</h3>
+            {
+                showCreateRelModal && (
+                    <div className="modal-backdrop" onClick={() => setShowCreateRelModal(false)}>
+                        <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+                            <h3 style={{ marginBottom: 'var(--space-3)' }}>🔗 Create Relationship</h3>
 
-                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
-                            From Entity
-                        </label>
-                        <select
-                            className="input"
-                            value={relFromId || ''}
-                            onChange={(e) => setRelFromId(e.target.value || null)}
-                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
-                        >
-                            <option value="">— select —</option>
-                            {allEntities.map((e: Entity) => (
-                                <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
-                            ))}
-                        </select>
-
-                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
-                            To Entity
-                        </label>
-                        <select
-                            className="input"
-                            value={relToId || ''}
-                            onChange={(e) => setRelToId(e.target.value || null)}
-                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
-                        >
-                            <option value="">— select —</option>
-                            {allEntities.filter((e: Entity) => e.id !== relFromId).map((e: Entity) => (
-                                <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
-                            ))}
-                        </select>
-
-                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
-                            Type
-                        </label>
-                        <select
-                            className="input"
-                            value={relType}
-                            onChange={(e) => setRelType(e.target.value)}
-                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
-                        >
-                            {RELATIONSHIP_TYPES.map(t => (
-                                <option key={t} value={t}>{t}</option>
-                            ))}
-                        </select>
-
-                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
-                            Label (optional)
-                        </label>
-                        <input
-                            className="input"
-                            placeholder="e.g. defeats, mentors, discovers"
-                            value={relLabel}
-                            onChange={(e) => setRelLabel(e.target.value)}
-                            style={{ width: '100%', marginBottom: 'var(--space-2)' }}
-                        />
-
-                        <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            💪 Strength
-                            <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--accent)', fontWeight: 600 }}>{relStrength}/5</span>
-                        </label>
-                        <input
-                            type="range"
-                            min={1}
-                            max={5}
-                            value={relStrength}
-                            onChange={e => setRelStrength(Number(e.target.value))}
-                            style={{ width: '100%', marginBottom: 'var(--space-3)', accentColor: 'var(--accent)' }}
-                        />
-
-                        <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
-                            <button className="btn btn-ghost" onClick={() => setShowCreateRelModal(false)}>Cancel</button>
-                            <button
-                                className="btn btn-primary"
-                                disabled={!relFromId || !relToId || relFromId === relToId}
-                                onClick={() => {
-                                    if (!relFromId || !relToId) return;
-                                    createRelationship.mutate({
-                                        from_entity_id: relFromId,
-                                        to_entity_id: relToId,
-                                        relationship_type: relType,
-                                        label: relLabel || undefined,
-                                        metadata: { strength: relStrength },
-                                    });
-                                }}
+                            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                                From Entity
+                            </label>
+                            <select
+                                className="input"
+                                value={relFromId || ''}
+                                onChange={(e) => setRelFromId(e.target.value || null)}
+                                style={{ width: '100%', marginBottom: 'var(--space-2)' }}
                             >
-                                {createRelationship.isPending ? 'Creating…' : 'Create'}
-                            </button>
+                                <option value="">— select —</option>
+                                {allEntities.map((e: Entity) => (
+                                    <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
+                                ))}
+                            </select>
+
+                            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                                To Entity
+                            </label>
+                            <select
+                                className="input"
+                                value={relToId || ''}
+                                onChange={(e) => setRelToId(e.target.value || null)}
+                                style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                            >
+                                <option value="">— select —</option>
+                                {allEntities.filter((e: Entity) => e.id !== relFromId).map((e: Entity) => (
+                                    <option key={e.id} value={e.id}>{ENTITY_ICONS[e.entity_type]} {e.name}</option>
+                                ))}
+                            </select>
+
+                            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                                Type
+                            </label>
+                            <select
+                                className="input"
+                                value={relType}
+                                onChange={(e) => setRelType(e.target.value)}
+                                style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                            >
+                                {RELATIONSHIP_TYPES.map(t => (
+                                    <option key={t} value={t}>{t}</option>
+                                ))}
+                            </select>
+
+                            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>
+                                Label (optional)
+                            </label>
+                            <input
+                                className="input"
+                                placeholder="e.g. defeats, mentors, discovers"
+                                value={relLabel}
+                                onChange={(e) => setRelLabel(e.target.value)}
+                                style={{ width: '100%', marginBottom: 'var(--space-2)' }}
+                            />
+
+                            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                💪 Strength
+                                <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--accent)', fontWeight: 600 }}>{relStrength}/5</span>
+                            </label>
+                            <input
+                                type="range"
+                                min={1}
+                                max={5}
+                                value={relStrength}
+                                onChange={e => setRelStrength(Number(e.target.value))}
+                                style={{ width: '100%', marginBottom: 'var(--space-3)', accentColor: 'var(--accent)' }}
+                            />
+
+                            <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
+                                <button className="btn btn-ghost" onClick={() => setShowCreateRelModal(false)}>Cancel</button>
+                                <button
+                                    className="btn btn-primary"
+                                    disabled={!relFromId || !relToId || relFromId === relToId}
+                                    onClick={() => {
+                                        if (!relFromId || !relToId) return;
+                                        createRelationship.mutate({
+                                            from_entity_id: relFromId,
+                                            to_entity_id: relToId,
+                                            relationship_type: relType,
+                                            label: relLabel || undefined,
+                                            metadata: { strength: relStrength },
+                                        });
+                                    }}
+                                >
+                                    {createRelationship.isPending ? 'Creating…' : 'Create'}
+                                </button>
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
             {/* ─── Global Search Overlay (⌘K) ──────────────── */}
-            {globalSearchOpen && (
-                <div
-                    style={{
-                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
-                        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-                        paddingTop: '15vh', zIndex: 9999,
-                    }}
-                    onClick={() => setGlobalSearchOpen(false)}
-                >
+            {
+                globalSearchOpen && (
                     <div
                         style={{
-                            background: 'var(--bg-primary)', borderRadius: 'var(--radius-lg)',
-                            border: '1px solid var(--border)', width: '90%', maxWidth: 560,
-                            boxShadow: '0 25px 50px rgba(0,0,0,0.5)', overflow: 'hidden',
+                            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+                            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+                            paddingTop: '15vh', zIndex: 9999,
                         }}
-                        onClick={(e) => e.stopPropagation()}
+                        onClick={() => setGlobalSearchOpen(false)}
                     >
-                        {/* Search Input */}
-                        <div style={{
-                            display: 'flex', alignItems: 'center', gap: 8,
-                            padding: '12px 16px', borderBottom: '1px solid var(--border)',
-                        }}>
-                            <span style={{ fontSize: 18 }}>🔍</span>
-                            <input
-                                ref={globalSearchRef}
-                                className="input"
-                                placeholder="Search all entities..."
-                                value={globalSearchQuery}
-                                onChange={(e) => setGlobalSearchQuery(e.target.value)}
-                                style={{
-                                    border: 'none', background: 'transparent',
-                                    fontSize: 'var(--text-md)', flex: 1, outline: 'none',
-                                }}
-                            />
-                            <kbd style={{
-                                padding: '2px 6px', borderRadius: 4, fontSize: 11,
-                                color: 'var(--text-tertiary)', border: '1px solid var(--border)',
-                                background: 'var(--bg-secondary)',
-                            }}>ESC</kbd>
-                        </div>
+                        <div
+                            style={{
+                                background: 'var(--bg-primary)', borderRadius: 'var(--radius-lg)',
+                                border: '1px solid var(--border)', width: '90%', maxWidth: 560,
+                                boxShadow: '0 25px 50px rgba(0,0,0,0.5)', overflow: 'hidden',
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {/* Search Input */}
+                            <div style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                padding: '12px 16px', borderBottom: '1px solid var(--border)',
+                            }}>
+                                <span style={{ fontSize: 18 }}>🔍</span>
+                                <input
+                                    ref={globalSearchRef}
+                                    className="input"
+                                    placeholder="Search all entities..."
+                                    value={globalSearchQuery}
+                                    onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                                    style={{
+                                        border: 'none', background: 'transparent',
+                                        fontSize: 'var(--text-md)', flex: 1, outline: 'none',
+                                    }}
+                                />
+                                <kbd style={{
+                                    padding: '2px 6px', borderRadius: 4, fontSize: 11,
+                                    color: 'var(--text-tertiary)', border: '1px solid var(--border)',
+                                    background: 'var(--bg-secondary)',
+                                }}>ESC</kbd>
+                            </div>
 
-                        {/* Results */}
-                        <div style={{ maxHeight: 400, overflowY: 'auto', padding: '8px 0' }}>
-                            {globalSearchQuery.length < 2 && (
-                                <p style={{
-                                    padding: '16px', textAlign: 'center',
-                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
-                                }}>
-                                    Type at least 2 characters to search...
-                                </p>
-                            )}
-
-                            {globalSearchData && Object.entries(globalSearchData.grouped).map(([type, items]) => (
-                                <div key={type}>
-                                    <div style={{
-                                        padding: '6px 16px', fontSize: 11, fontWeight: 600,
-                                        color: 'var(--text-tertiary)', textTransform: 'uppercase',
-                                        letterSpacing: 1,
+                            {/* Results */}
+                            <div style={{ maxHeight: 400, overflowY: 'auto', padding: '8px 0' }}>
+                                {globalSearchQuery.length < 2 && (
+                                    <p style={{
+                                        padding: '16px', textAlign: 'center',
+                                        color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
                                     }}>
-                                        {ENTITY_ICONS[type] || '📄'} {type}s ({items.length})
-                                    </div>
-                                    {items.map((entity: Entity) => (
-                                        <button
-                                            key={entity.id}
-                                            onClick={() => {
-                                                setSelectedEntity(entity);
-                                                setGlobalSearchOpen(false);
-                                            }}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: 8,
-                                                width: '100%', padding: '8px 16px', border: 'none',
-                                                background: 'transparent', cursor: 'pointer',
-                                                color: 'var(--text-primary)', fontSize: 'var(--text-sm)',
-                                                textAlign: 'left', transition: 'background 0.1s',
-                                            }}
-                                            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-secondary)')}
-                                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                                        >
-                                            <span style={{ fontSize: 16 }}>{ENTITY_ICONS[entity.entity_type] || '📄'}</span>
-                                            <div style={{ flex: 1, minWidth: 0 }}>
-                                                <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                    {entity.name}
-                                                </div>
-                                                {entity.description && (
-                                                    <div style={{
-                                                        fontSize: 11, color: 'var(--text-tertiary)',
-                                                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                                    }}>
-                                                        {entity.description.slice(0, 80)}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </button>
-                                    ))}
-                                </div>
-                            ))}
+                                        Type at least 2 characters to search...
+                                    </p>
+                                )}
 
-                            {globalSearchQuery.length >= 2 && globalSearchData && globalSearchData.results.length === 0 && (
-                                <p style={{
-                                    padding: '16px', textAlign: 'center',
-                                    color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
-                                }}>
-                                    No results found for "{globalSearchQuery}"
-                                </p>
-                            )}
+                                {globalSearchData && Object.entries(globalSearchData.grouped).map(([type, items]) => (
+                                    <div key={type}>
+                                        <div style={{
+                                            padding: '6px 16px', fontSize: 11, fontWeight: 600,
+                                            color: 'var(--text-tertiary)', textTransform: 'uppercase',
+                                            letterSpacing: 1,
+                                        }}>
+                                            {ENTITY_ICONS[type] || '📄'} {type}s ({items.length})
+                                        </div>
+                                        {items.map((entity: Entity) => (
+                                            <button
+                                                key={entity.id}
+                                                onClick={() => {
+                                                    setSelectedEntity(entity);
+                                                    setGlobalSearchOpen(false);
+                                                }}
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', gap: 8,
+                                                    width: '100%', padding: '8px 16px', border: 'none',
+                                                    background: 'transparent', cursor: 'pointer',
+                                                    color: 'var(--text-primary)', fontSize: 'var(--text-sm)',
+                                                    textAlign: 'left', transition: 'background 0.1s',
+                                                }}
+                                                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                                            >
+                                                <span style={{ fontSize: 16 }}>{ENTITY_ICONS[entity.entity_type] || '📄'}</span>
+                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {entity.name}
+                                                    </div>
+                                                    {entity.description && (
+                                                        <div style={{
+                                                            fontSize: 11, color: 'var(--text-tertiary)',
+                                                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                        }}>
+                                                            {entity.description.slice(0, 80)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                ))}
+
+                                {globalSearchQuery.length >= 2 && globalSearchData && globalSearchData.results.length === 0 && (
+                                    <p style={{
+                                        padding: '16px', textAlign: 'center',
+                                        color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)',
+                                    }}>
+                                        No results found for "{globalSearchQuery}"
+                                    </p>
+                                )}
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
         </div>
     );
