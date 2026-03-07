@@ -60,7 +60,7 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
     const handleGenerate = async () => {
         setIsGenerating(true);
         try {
-            const entitiesData = queryClient.getQueryData<{ entities: Entity[] }>(['entities', projectId]);
+            const entitiesData = queryClient.getQueryData<{ entities: Entity[] }>(['entities', projectId, 'all']);
             const relsData = queryClient.getQueryData<{ relationships: Relationship[] }>(['relationships', projectId]);
 
             if (!entitiesData || !relsData) {

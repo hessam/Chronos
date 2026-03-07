@@ -10,7 +10,7 @@ import { useAuthStore } from '../store/authStore';
 
 import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
-
+import ProseTab from '../components/ProseTab';
 import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 const ENTITY_ICONS: Record<string, string> = {
@@ -142,10 +142,6 @@ export default function WorkspacePage() {
     // Chapter Assembler state
 
     // POV Analysis state
-
-    // Draft text state
-    const [draftText, setDraftText] = useState('');
-    const [showDraftSection, setShowDraftSection] = useState(false);
 
     // Relationship strength state
     const [relStrength, setRelStrength] = useState(3);
@@ -510,16 +506,6 @@ export default function WorkspacePage() {
 
     // POV Balance Analysis (Feature 8)
 
-    // Draft text save (Feature 10)
-    const handleSaveDraft = (text: string) => {
-        if (!selectedEntity || selectedEntity.entity_type !== 'event') return;
-        setDraftText(text);
-        updateEntity.mutate({
-            id: selectedEntity.id,
-            body: { properties: { ...selectedEntity.properties, draft_text: text } },
-        });
-    };
-
     // Chapter Assembly (Feature 5)
 
     // Temporal gap calculation (Feature 12)
@@ -589,6 +575,53 @@ export default function WorkspacePage() {
         timelineColorMap.set(t.id, VARIANT_DOT_COLORS[i % VARIANT_DOT_COLORS.length]);
     });
 
+    const [isExporting, setIsExporting] = useState(false);
+
+    const handleExportManuscript = async () => {
+        if (!projectId) return;
+        setIsExporting(true);
+        try {
+            const { drafts } = await api.exportManuscript(projectId);
+            if (!drafts || drafts.length === 0) {
+                alert("No accepted drafts found. Accept some drafts in the Prose Tab first!");
+                return;
+            }
+
+            // Sort drafts by their entity's sort_order (chronological)
+            const sortedDrafts = drafts.sort((a, b) => {
+                const orderA = a.entity?.sort_order ?? Number.MAX_SAFE_INTEGER;
+                const orderB = b.entity?.sort_order ?? Number.MAX_SAFE_INTEGER;
+                return orderA - orderB;
+            });
+
+            // Build Markdown document
+            let markdown = `# ${currentProject?.name || 'Project'} Manuscript\n\n`;
+
+            sortedDrafts.forEach(draft => {
+                markdown += `## ${draft.entity?.name || 'Scene'}\n\n`;
+                markdown += `${draft.content}\n\n`;
+                markdown += `---\n\n`; // Scene break
+            });
+
+            // Trigger download
+            const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${(currentProject?.name || 'Manuscript').replace(/\s+/g, '_')}_Manuscript.md`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+        } catch (err) {
+            console.error('Export failed:', err);
+            alert('Failed to export manuscript.');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
 
     // Resolve selected entity for display when in focus mode
     const displayEntity = selectedEntity
@@ -604,6 +637,14 @@ export default function WorkspacePage() {
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
                         <button className="btn btn-ghost btn-sm" onClick={() => navigate('/projects')}>← Back</button>
                         <div style={{ display: 'flex', gap: 4 }}>
+                            <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={handleExportManuscript}
+                                title="Export Manuscript"
+                                disabled={isExporting}
+                            >
+                                {isExporting ? <div className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }}></div> : '📄'}
+                            </button>
                             <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/project/${projectId}/analytics`)} title="Analytics">📊</button>
                             <button className="btn btn-ghost btn-sm" onClick={signOut} title="Sign Out">🚪</button>
                         </div>
@@ -1632,47 +1673,19 @@ export default function WorkspacePage() {
                             );
                         })()}
 
-                        {/* Draft Integration (events only — Feature 10) */}
-                        {selectedEntity?.entity_type === 'event' && (
+                        {/* Agentic Prose Generation (Ticket B-05) */}
+                        {selectedEntity?.entity_type === 'event' && projectId && (
                             <div style={{
                                 marginTop: 'var(--space-2)', padding: 'var(--space-3)',
                                 background: 'rgba(100,116,139,0.06)',
                                 borderRadius: 'var(--radius-lg)', border: '1px solid rgba(100,116,139,0.15)',
                             }}>
-                                <h4
-                                    style={{ fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: showDraftSection ? 'var(--space-2)' : 0, cursor: 'pointer' }}
-                                    onClick={() => {
-                                        setShowDraftSection(!showDraftSection);
-                                        if (!showDraftSection) {
-                                            setDraftText(((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || '');
-                                        }
-                                    }}
-                                >
-                                    📝 Draft Text
-                                    {(() => {
-                                        const dt = ((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || '';
-                                        const wc = dt ? dt.split(/\s+/).filter(Boolean).length : 0;
-                                        return wc > 0 ? <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--accent)', fontWeight: 500 }}>{wc.toLocaleString()}w</span> : null;
-                                    })()}
-                                    <span style={{ marginLeft: showDraftSection ? 0 : 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>{showDraftSection ? '▼' : '▶'}</span>
-                                </h4>
-                                {showDraftSection && (
-                                    <>
-                                        <textarea
-                                            className="textarea"
-                                            value={draftText}
-                                            onChange={e => setDraftText(e.target.value)}
-                                            onBlur={e => handleSaveDraft(e.target.value)}
-                                            rows={8}
-                                            placeholder="Paste or write your scene draft here..."
-                                            style={{ width: '100%', fontSize: 'var(--text-sm)', fontFamily: 'Georgia, serif', lineHeight: 1.7 }}
-                                        />
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-                                            <span>{draftText.split(/\s+/).filter(Boolean).length.toLocaleString()} words</span>
-                                            <span>Auto-saves on blur</span>
-                                        </div>
-                                    </>
-                                )}
+                                <ProseTab
+                                    entityId={selectedEntity.id}
+                                    projectId={projectId}
+                                    entityName={displayEntity?.name || selectedEntity.name}
+                                    initialDraft={((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || ''}
+                                />
                             </div>
                         )}
 

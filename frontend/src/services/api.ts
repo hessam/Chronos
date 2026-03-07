@@ -491,6 +491,22 @@ export const api = {
         return { draft: data as ProseDraft };
     },
 
+    // ─── Export ───────────────────────────────────────────────────
+    async exportManuscript(projectId: string): Promise<{ drafts: (ProseDraft & { entity: Entity })[] }> {
+        const { data, error } = await supabase
+            .from('prose_drafts')
+            .select(`
+                *,
+                entity:entities (*)
+            `)
+            .eq('project_id', projectId)
+            .eq('status', 'accepted')
+            .order('created_at', { ascending: true }); // We'll sort by entity sort_order on the client
+
+        if (error) throw new Error(error.message);
+        return { drafts: (data || []) as (ProseDraft & { entity: Entity })[] };
+    },
+
     // ─── Style Profiles ──────────────────────────────────────
     async getStyleProfile(projectId: string): Promise<{ profile: StyleProfile | null }> {
         const { data, error } = await supabase
