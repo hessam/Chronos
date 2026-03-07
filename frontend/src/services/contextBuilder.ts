@@ -14,6 +14,21 @@ export interface ContextReport {
     };
 }
 
+export interface StoryState {
+    characters: Array<{ name: string; description: string; attributes: Record<string, unknown> }>;
+    locations: Array<{ name: string; description: string; attributes: Record<string, unknown> }>;
+    timeline: string; // Narrative summary of events preceding the current scene
+    activeRelationships: Array<{ from: string; to: string; type: string }>;
+    sceneMandates: {
+        povCharacter: string;
+        location: string;
+        beats: Array<{ type: string; description: string }>;
+        sceneEndCondition: string;   // How this scene must end
+        prevEventSummary: string;    // What happened immediately before
+        nextEventSummary: string;    // What happens next — AI must NOT write this
+    };
+}
+
 export interface SmartContextParams {
     currentEvent: Entity;
     allEntities: Entity[];
@@ -237,5 +252,108 @@ export function buildSmartContext(params: SmartContextParams): ContextReport {
         excludedEntities: finalExcluded,
         estimatedTokens: currentTokens,
         breakdown
+    };
+}
+
+/**
+ * Compiles a strict "Story State" JSON mapping to be used as authoritative context for the generative AI.
+ * Focuses on concrete properties, the linear timeline preceding the scene, and active relationships.
+ */
+export function compileStoryState(params: SmartContextParams & {
+    contextReport: ContextReport,
+    currentBeats: Array<{ type: string; description: string }>
+}): StoryState {
+    const { currentEvent, allEntities, allRelationships, contextReport, currentBeats } = params;
+
+    const characters: StoryState['characters'] = [];
+    const locations: StoryState['locations'] = [];
+
+    // Filter relevant entities
+    contextReport.includedEntities.forEach(e => {
+        if (e.entity_type === 'character') {
+            characters.push({
+                name: e.name,
+                description: e.description || '',
+                attributes: Object.fromEntries(
+                    Object.entries(e.properties || {}).filter(([k]) => k !== 'draft_prose' && k !== 'scene_beats')
+                )
+            });
+        } else if (e.entity_type === 'location') {
+            locations.push({
+                name: e.name,
+                description: e.description || '',
+                attributes: Object.fromEntries(
+                    Object.entries(e.properties || {}).filter(([k]) => k !== 'draft_prose' && k !== 'scene_beats')
+                )
+            });
+        }
+    });
+
+    // Build timeline leading UP TO currentEvent
+    let timelineStr = '';
+    const timelineEvents = allEntities
+        .filter(e => e.entity_type === 'event' &&
+            e.properties?.timeline_id === currentEvent.properties?.timeline_id &&
+            typeof e.sort_order === 'number' &&
+            typeof currentEvent.sort_order === 'number' &&
+            e.sort_order < currentEvent.sort_order)
+        .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+    if (timelineEvents.length === 0) {
+        timelineStr = 'This is the beginning of the timeline.';
+    } else {
+        timelineEvents.forEach(e => {
+            timelineStr += `- ${e.name}: ${e.description}\n`;
+        });
+    }
+
+    // Isolate relationships that connect the included characters
+    const includedCharIds = contextReport.includedEntities.filter(e => e.entity_type === 'character').map(e => e.id);
+    const activeRels = allRelationships.filter(r =>
+        includedCharIds.includes(r.from_entity_id) && includedCharIds.includes(r.to_entity_id)
+    );
+
+    const activeRelationships = activeRels.map(r => {
+        const fromName = allEntities.find(e => e.id === r.from_entity_id)?.name || 'Unknown';
+        const toName = allEntities.find(e => e.id === r.to_entity_id)?.name || 'Unknown';
+        return { from: fromName, to: toName, type: r.relationship_type };
+    });
+
+    // Scene Mandates
+    const povId = currentEvent.properties?.pov_character_id as string;
+    const locId = currentEvent.properties?.location_id as string;
+
+    const povCharacter = allEntities.find(e => e.id === povId)?.name || 'Unknown/Omniscient';
+    const locationName = allEntities.find(e => e.id === locId)?.name || 'Unknown';
+
+    // Scene Boundary: find previous and next events in timeline
+    const allTimelineEvents = allEntities
+        .filter(e => e.entity_type === 'event' &&
+            e.properties?.timeline_id === currentEvent.properties?.timeline_id &&
+            typeof e.sort_order === 'number')
+        .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+    const currentIdx = allTimelineEvents.findIndex(e => e.id === currentEvent.id);
+    const prevEvent = currentIdx > 0 ? allTimelineEvents[currentIdx - 1] : null;
+    const nextEvent = currentIdx >= 0 && currentIdx < allTimelineEvents.length - 1
+        ? allTimelineEvents[currentIdx + 1] : null;
+
+    const sceneEndCondition = (currentEvent.properties?.scene_end_condition as string) || '';
+    const prevEventSummary = prevEvent ? `${prevEvent.name}: ${prevEvent.description || ''}` : 'This is the first event in the timeline.';
+    const nextEventSummary = nextEvent ? `${nextEvent.name}: ${nextEvent.description || ''}` : 'This is the last event in the timeline.';
+
+    return {
+        characters,
+        locations,
+        timeline: timelineStr.trim(),
+        activeRelationships,
+        sceneMandates: {
+            povCharacter,
+            location: locationName,
+            beats: currentBeats,
+            sceneEndCondition,
+            prevEventSummary,
+            nextEventSummary
+        }
     };
 }

@@ -345,7 +345,147 @@ export async function generateIdeas(
 
 // ─── Beat Prose Generation (New Feature) ────────────────────
 
-import type { ContextReport } from './contextBuilder';
+import type { ContextReport, StoryState } from './contextBuilder';
+import { validateProse, buildRevisionPrompt, type ValidationResult } from './proseValidator';
+import { getStylePreset, compileStylePrompt } from './stylePresets';
+
+export interface AgenticProseRequest {
+    instruction: string;
+    storyState: StoryState;
+    currentDraft: string;
+    projectContext?: string;
+    stylePresetId?: string;
+    targetWordCount?: number;
+}
+
+export interface AgenticProseResult {
+    assumptions: string;
+    diff: {
+        targetTextToReplace: string | null;
+        newText: string;
+    };
+    validation?: ValidationResult;
+    attempt?: number;
+}
+
+export async function generateAgenticProse(
+    req: AgenticProseRequest,
+    settings?: AISettings
+): Promise<AgenticProseResult> {
+    const aiSettings = settings || loadAISettings();
+
+    // Resolve style preset
+    const stylePreset = req.stylePresetId ? getStylePreset(req.stylePresetId) : undefined;
+    const styleBlock = stylePreset ? compileStylePrompt(stylePreset) : '';
+
+    // Build scene boundary block
+    const sceneBoundaryBlock = `## SCENE BOUNDARIES (CRITICAL — do NOT violate)
+
+PREVIOUS EVENT: ${req.storyState.sceneMandates.prevEventSummary}
+THIS SCENE: ${req.storyState.sceneMandates.beats.map((b, i) => `${i + 1}. [${b.type}] ${b.description}`).join('\n')}
+${req.storyState.sceneMandates.sceneEndCondition ? `THIS SCENE MUST END WITH: ${req.storyState.sceneMandates.sceneEndCondition}` : ''}
+NEXT EVENT: ${req.storyState.sceneMandates.nextEventSummary}
+
+⚠️ You MUST NOT write content that belongs to the NEXT EVENT. Stay within THIS SCENE's beats only.
+⚠️ If the next event involves a different action, decision, or revelation — STOP BEFORE reaching it.`;
+
+    const basePrompt = `You are an expert fiction writer acting as a co-author. You write publishable-quality prose.
+
+## 1. HARD CONSTRAINTS (MANDATORY — violation = regeneration)
+
+1. SHOW, DON'T TELL. Ground every moment in physical senses. Never name emotions directly.
+2. NO PURPLE PROSE. Use hard, concrete nouns and active verbs. No abstractions.
+3. Character thoughts MUST reflect their profession, speech patterns, and knowledge level.
+4. Every paragraph must include at least 2 sensory channels (sight, sound, touch, smell, taste).
+5. Obey the Canonical Story State implicitly. Do not contradict established facts.
+${req.targetWordCount ? `6. Target word count for generated prose: ${req.targetWordCount} words (±15%).` : ''}
+
+${styleBlock}
+
+${req.projectContext || ''}
+
+## 2. SCENE BOUNDARIES
+${sceneBoundaryBlock}
+
+## 3. CANONICAL STORY STATE
+
+- **POV Character:** ${req.storyState.sceneMandates.povCharacter}
+- **Location:** ${req.storyState.sceneMandates.location}
+- **Active Characters:**
+${req.storyState.characters.map(c => `  - ${c.name}: ${c.description} [Attributes: ${JSON.stringify(c.attributes)}]`).join('\n')}
+- **Active Locations:**
+${req.storyState.locations.map(l => `  - ${l.name}: ${l.description} [Attributes: ${JSON.stringify(l.attributes)}]`).join('\n')}
+- **Active Relationships:**
+${req.storyState.activeRelationships.map(r => `  - ${r.from} -> ${r.to}: ${r.type}`).join('\n')}
+
+## 4. The Story So Far (Chronological Timeline)
+${req.storyState.timeline}
+
+## 5. Current Draft Prose
+"""
+${req.currentDraft}
+"""
+
+## 6. User Instruction
+${req.instruction}
+
+## 7. OUTPUT FORMAT
+
+Respond EXACTLY with valid JSON — no markdown fences, no explanation:
+{
+  "assumptions": "A 1-2 sentence declaration proving you understand the POV, Location, Timeline state, and Scene Boundaries.",
+  "diff": {
+    "targetTextToReplace": "The EXACT existing string from the Current Draft you are replacing. If the instruction is to continue/append, set this to null.",
+    "newText": "The newly generated or edited narrative prose."
+  }
+}
+`;
+
+    const prompt = basePrompt;
+
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
+    let lastError: Error | null = null;
+    const MAX_ATTEMPTS = stylePreset ? 3 : 1;
+
+    for (const provider of providers) {
+        if (!aiSettings.apiKeys[provider]) continue;
+        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
+        if (!model) continue;
+
+        let currentPrompt = prompt;
+
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                const raw = await callProvider(provider, model, currentPrompt, aiSettings.apiKeys[provider]!);
+                let jsonStr = raw;
+                const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+                if (jsonMatch) jsonStr = jsonMatch[1];
+                const result = JSON.parse(jsonStr.trim()) as AgenticProseResult;
+
+                // Validate if we have a style preset
+                if (stylePreset && result.diff.newText) {
+                    const validation = validateProse(result.diff.newText, stylePreset, req.targetWordCount);
+                    result.validation = validation;
+                    result.attempt = attempt;
+
+                    if (!validation.passed && attempt < MAX_ATTEMPTS) {
+                        // Auto-retry with revision prompt
+                        console.log(`[ProseValidator] Attempt ${attempt} failed (score: ${validation.score}). Retrying...`);
+                        const revisionInstructions = buildRevisionPrompt(result.diff.newText, validation.issues);
+                        currentPrompt = `${prompt}\n\n## REVISION REQUEST (Attempt ${attempt + 1})\n${revisionInstructions}`;
+                        continue;
+                    }
+                }
+
+                return result;
+            } catch (e) {
+                lastError = e instanceof Error ? e : new Error(String(e));
+                console.warn(`Provider ${provider} failed for generateAgenticProse (attempt ${attempt})`, e);
+            }
+        }
+    }
+    throw new Error(lastError?.message || 'No AI provider available');
+}
 
 export interface GenerateBeatProseRequest {
     beat: {
@@ -369,43 +509,43 @@ export async function generateBeatProse(
 
     let smartContextStr = '';
     if (req.contextReport && req.contextReport.includedEntities.length > 0) {
-        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment:\n`;
+        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment: \n`;
         req.contextReport.includedEntities.forEach(e => {
-            smartContextStr += `- ${e.name} (${e.entity_type}): ${e.description}\n`;
+            smartContextStr += `- ${e.name}(${e.entity_type}): ${e.description} \n`;
             if (e.properties) {
                 // Selectively stringify some properties if useful, but keeping it brief to avoid massive tokens
                 const keyProps = Object.entries(e.properties)
                     .filter(([k, v]) => k !== 'draft_prose' && k !== 'scene_beats' && typeof v === 'string')
                     .map(([k, v]) => `${k}: ${v}`)
                     .join(', ');
-                if (keyProps) smartContextStr += `  Properties: ${keyProps}\n`;
+                if (keyProps) smartContextStr += `  Properties: ${keyProps} \n`;
             }
         });
     }
 
-    const basePrompt = `You are an AI co-author for a novel.
-    
-Context:
-Project: ${req.context.projectContext || 'Unknown Project'}
-Scene/Event: ${req.context.entityName} (${req.context.entityDescription})
+    const basePrompt = `You are an AI co - author for a novel.
+
+                Context:
+                Project: ${req.context.projectContext || 'Unknown Project'}
+            Scene / Event: ${req.context.entityName} (${req.context.entityDescription})
 
 ${req.context.previousProse ? `Previous Context:\n${req.context.previousProse}\n` : ''}${smartContextStr}
 
-Current Beat (${req.beat.type}): ${req.beat.description}
+Current Beat(${req.beat.type}): ${req.beat.description}
 
-Task: Write a single paragraph of high-quality narrative prose for this beat. 
+            Task: Write a single paragraph of high - quality narrative prose for this beat. 
 Style Constraints:
-1. SHOW, DON'T TELL. Ground the scene in physical senses (sight, sound, smell, touch, taste).
-2. NO PURPLE PROSE. Limit adjectives. Zero abstract metaphors. Use hard, concrete nouns and active verbs.
+                1. SHOW, DON'T TELL. Ground the scene in physical senses (sight, sound, smell, touch, taste).
+            2. NO PURPLE PROSE.Limit adjectives.Zero abstract metaphors.Use hard, concrete nouns and active verbs.
 3. FORBIDDEN WORDS: "seemed to", "felt like", "realized", "suddenly", "began to".
 4. If the beat is "dialogue", include actual spoken words.
 
-Output: Just the prose paragraph, nothing else. No commentary.`;
+                Output: Just the prose paragraph, nothing else. No commentary.`;
 
     // Implement Prompt Tachtique (Duplicate context for maximum instruction adherence)
-    const prompt = `${basePrompt}\n\n[RE-READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt}`;
+    const prompt = `${basePrompt} \n\n[RE - READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt} `;
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
     let lastError: Error | null = null;
 
     for (const provider of providers) {
@@ -443,27 +583,29 @@ export async function analyzeDraftProse(
 Intended Beat: ${beatDescription}
 
 Draft Prose:
-"""
+            """
 ${draft}
-"""
+            """
 
 Analyze the draft and return an array of actionable critiques if it fails to meet the beat's implicit emotional or physical requirements, or if the consequences are too vague. Be extremely strict. If it's perfect, return an empty array.
 
 Return ONLY a JSON array of objects with the following keys:
-- "id": a short string identifier (e.g. "missing-conflict")
-- "message": what is wrong (e.g. "Missing internal conflict before action")
-- "suggestion": actionable fix (e.g. "Add a sentence hesitating before pulling the lever")
-- "severity": "high", "medium", or "low"
-`;
+            - "id": a short string identifier(e.g. "missing-conflict")
+                - "message": what is wrong(e.g. "Missing internal conflict before action")
+                    - "suggestion": actionable fix(e.g. "Add a sentence hesitating before pulling the lever")
+                        - "severity": "high", "medium", or "low"
+                            `;
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
     for (const provider of providers) {
         if (!aiSettings.apiKeys[provider]) continue;
         const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
         try {
             const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
-            const jsonStr = text.replace(/```json\n?|\n?```/g, '').trim();
-            return JSON.parse(jsonStr) as DraftCritique[];
+            let jsonStr = text;
+            const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            return JSON.parse(jsonStr.trim()) as DraftCritique[];
         } catch (e) {
             console.warn(`Provider ${provider} failed for analyzeDraftProse`, e);
         }
@@ -478,22 +620,22 @@ export async function reviseBeatProse(
     settings?: AISettings
 ): Promise<string> {
     const aiSettings = settings || loadAISettings();
-    const prompt = `You are an expert AI co-author revising a draft.
+    const prompt = `You are an expert AI co - author revising a draft.
 
 Intended Beat: ${beatDescription}
 
 Current Draft:
-"""
+            """
 ${draft}
-"""
+            """
 
 Critique to Address:
-- Issue: ${critique.message}
-- Required Fix: ${critique.suggestion}
+            - Issue: ${critique.message}
+            - Required Fix: ${critique.suggestion}
 
-Task: Rewrite the draft to address the critique while maintaining the core narrative, style, and length. Provide ONLY the revised paragraph, nothing else.`;
+            Task: Rewrite the draft to address the critique while maintaining the core narrative, style, and length.Provide ONLY the revised paragraph, nothing else.`;
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
     let lastError: Error | null = null;
     for (const provider of providers) {
         if (!aiSettings.apiKeys[provider]) continue;
@@ -522,36 +664,36 @@ export async function suggestBeats(
 
     let smartContextStr = '';
     if (contextReport && contextReport.includedEntities.length > 0) {
-        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment:\n`;
+        smartContextStr = `\n## SMART DATABASE CONTEXT\nThe following entities from the project database are highly relevant to this exact moment: \n`;
         contextReport.includedEntities.forEach(e => {
-            smartContextStr += `- ${e.name} (${e.entity_type}): ${e.description}\n`;
+            smartContextStr += `- ${e.name} (${e.entity_type}): ${e.description} \n`;
             if (e.properties) {
                 const keyProps = Object.entries(e.properties)
                     .filter(([k, v]) => k !== 'draft_prose' && k !== 'scene_beats' && typeof v === 'string')
-                    .map(([k, v]) => `${k}: ${v}`)
+                    .map(([k, v]) => `${k}: ${v} `)
                     .join(', ');
-                if (keyProps) smartContextStr += `  Properties: ${keyProps}\n`;
+                if (keyProps) smartContextStr += `  Properties: ${keyProps} \n`;
             }
         });
     }
 
     const basePrompt = `You are an expert story outliner.
-    
-Context:
-Project: ${context.projectContext || 'Unknown'}
-Event: ${context.entityName}
-Description: ${context.entityDescription}
-${smartContextStr}
-Task: Break this event down into 5-8 distinct narrative beats (micro-events) that drive the story FORWARD.
-Constraint: Each beat must feature a concrete action, a piece of dialogue, or a clear discovery. Do not create beats where the character just stands and thinks.
 
-Format: Return ONLY a JSON array of objects with "type" (action, dialogue, emotion, description, internal) and "description" fields.
-Example: [{"type": "action", "description": "Hero enters the room."}, {"type": "dialogue", "description": "Villain laughs."}]`;
+                Context:
+            Project: ${context.projectContext || 'Unknown'}
+            Event: ${context.entityName}
+            Description: ${context.entityDescription}
+${smartContextStr}
+            Task: Break this event down into 5 - 8 distinct narrative beats(micro - events) that drive the story FORWARD.
+                Constraint: Each beat must feature a concrete action, a piece of dialogue, or a clear discovery.Do not create beats where the character just stands and thinks.
+
+                    Format: Return ONLY a JSON array of objects with "type"(action, dialogue, emotion, description, internal) and "description" fields.
+                        Example: [{ "type": "action", "description": "Hero enters the room." }, { "type": "dialogue", "description": "Villain laughs." }]`;
 
     // Implement Prompt Tachtique
-    const prompt = `${basePrompt}\n\n[RE-READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt}`;
+    const prompt = `${basePrompt} \n\n[RE - READING CORE INSTRUCTIONS FOR MAXIMUM ADHERENCE]\n\n${basePrompt} `;
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
 
     let lastError = null;
     for (const provider of providers) {
@@ -561,8 +703,10 @@ Example: [{"type": "action", "description": "Hero enters the room."}, {"type": "
         try {
             const text = await callProvider(provider, model, prompt, aiSettings.apiKeys[provider]!);
             // Clean up markdown code blocks if present
-            const jsonStr = text.replace(/```json\n?|\n?```/g, '').trim();
-            return JSON.parse(jsonStr);
+            let jsonStr = text;
+            const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            return JSON.parse(jsonStr.trim());
         } catch (e) {
             console.warn(`Provider ${provider} failed for suggestBeats`, e);
             lastError = e;
@@ -577,19 +721,19 @@ export async function checkBeatConsistency(
     settings?: AISettings
 ): Promise<string> {
     const aiSettings = settings || loadAISettings();
-    const beatsText = beats.map((b, i) => `${i + 1}. [${b.type}] ${b.description}`).join('\n');
+    const beatsText = beats.map((b, i) => `${i + 1}.[${b.type}] ${b.description} `).join('\n');
 
     const prompt = `Analyze the following sequence of beats for the event "${context.entityName}".
     
 Event Description: ${context.entityDescription}
 
-Beats:
+        Beats:
 ${beatsText}
 
-Task: Check for logical consistency, pacing issues, and alignment with the event description.
-Output: A concise paragraph highlighting any issues or confirming the sequence is solid.`;
+        Task: Check for logical consistency, pacing issues, and alignment with the event description.
+            Output: A concise paragraph highlighting any issues or confirming the sequence is solid.`;
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider, 'openai', 'anthropic', 'google'];
+    const providers: AIProvider[] = [aiSettings.defaultProvider];
 
     for (const provider of providers) {
         if (!aiSettings.apiKeys[provider]) continue;
@@ -667,10 +811,10 @@ const CATEGORY_LABELS: Record<IssueCategory, string> = {
 export { SEVERITY_ICONS, CATEGORY_LABELS };
 
 function buildConsistencyPrompt(req: CheckConsistencyRequest): string {
-    let prompt = `You are a narrative consistency analyzer for a multi-timeline storytelling tool called Chronos.
+    let prompt = `You are a narrative consistency analyzer for a multi - timeline storytelling tool called Chronos.
 
 ## Task
-Analyze the following narrative elements for **logical inconsistencies, contradictions, and plot holes**. Be thorough but fair — only flag genuine issues, not stylistic choices.
+Analyze the following narrative elements for ** logical inconsistencies, contradictions, and plot holes **.Be thorough but fair — only flag genuine issues, not stylistic choices.
 
 ## Project: ${req.projectName}
 ${req.scope === 'timeline' ? `## Scope: Timeline "${req.scopeTimelineName}"` : '## Scope: Entire Project'}
@@ -686,13 +830,13 @@ ${req.scope === 'timeline' ? `## Scope: Timeline "${req.scopeTimelineName}"` : '
     }
 
     for (const [type, entities] of Object.entries(grouped)) {
-        prompt += `\n### ${type.charAt(0).toUpperCase() + type.slice(1)}s\n`;
+        prompt += `\n### ${type.charAt(0).toUpperCase() + type.slice(1)} s\n`;
         for (const e of entities) {
-            prompt += `- **${e.name}**: ${e.description || '(no description)'}`;
+            prompt += `- ** ${e.name}**: ${e.description || '(no description)'} `;
             if (e.properties && Object.keys(e.properties).length > 0) {
                 const props = Object.entries(e.properties)
                     .filter(([, v]) => v !== null && v !== undefined && v !== '')
-                    .map(([k, v]) => `${k}: ${v}`)
+                    .map(([k, v]) => `${k}: ${v} `)
                     .join(', ');
                 if (props) prompt += ` [${props}]`;
             }
@@ -704,28 +848,28 @@ ${req.scope === 'timeline' ? `## Scope: Timeline "${req.scopeTimelineName}"` : '
 ## Analysis Categories
 Look for these specific types of issues:
 
-1. **Timeline Paradoxes** — Events that cannot coexist in the same timeline (e.g., a character dying before an event they participate in)
-2. **Character Conflicts** — Contradictory character traits, abilities, or states across different narrative elements
-3. **Causality Breaks** — Effects without causes, or events that should logically prevent subsequent events
-4. **Logic Gaps** — Missing connections, unexplained jumps, or narrative elements that don't fit together
+        1. ** Timeline Paradoxes ** — Events that cannot coexist in the same timeline(e.g., a character dying before an event they participate in)
+        2. ** Character Conflicts ** — Contradictory character traits, abilities, or states across different narrative elements
+        3. ** Causality Breaks ** — Effects without causes, or events that should logically prevent subsequent events
+        4. ** Logic Gaps ** — Missing connections, unexplained jumps, or narrative elements that don't fit together
 
 ## Response Format
 Respond ONLY with valid JSON in this exact format:
-{
-  "issues": [
-    {
-      "severity": "error|warning|suggestion",
-      "category": "timeline_paradox|character_conflict|causality_break|logic_gap",
-      "title": "Short descriptive title (max 10 words)",
-      "description": "2-3 sentence explanation of the issue",
-      "entityNames": ["Entity1", "Entity2"],
-      "suggestedFix": "Specific suggestion to resolve"
-    }
-  ]
-}
+        {
+            "issues": [
+                {
+                    "severity": "error|warning|suggestion",
+                    "category": "timeline_paradox|character_conflict|causality_break|logic_gap",
+                    "title": "Short descriptive title (max 10 words)",
+                    "description": "2-3 sentence explanation of the issue",
+                    "entityNames": ["Entity1", "Entity2"],
+                    "suggestedFix": "Specific suggestion to resolve"
+                }
+            ]
+        }
 
 If the narrative is consistent and you find no issues, return: { "issues": [] }
-Important: Return between 0 and 10 issues. Prioritize the most critical ones.`;
+        Important: Return between 0 and 10 issues. Prioritize the most critical ones.`;
 
     return prompt;
 }
@@ -739,7 +883,7 @@ async function callProviderForAnalysis(
 ): Promise<string> {
     const circuit = getCircuit(provider);
     if (circuit.isOpen) {
-        throw new Error(`Circuit breaker open for ${provider}. Will retry in ${Math.ceil((CIRCUIT_RESET_MS - (Date.now() - circuit.lastFailure)) / 1000)}s.`);
+        throw new Error(`Circuit breaker open for ${provider}.Will retry in ${Math.ceil((CIRCUIT_RESET_MS - (Date.now() - circuit.lastFailure)) / 1000)} s.`);
     }
 
     try {
@@ -752,14 +896,14 @@ async function callProviderForAnalysis(
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`,
+                        'Authorization': `Bearer ${apiKey} `
                     },
                     body: JSON.stringify({
                         model,
                         messages: [{ role: 'user', content: prompt }],
                         temperature: 0.3,   // Lower for analysis
-                        max_tokens: 4000,    // More room for detailed report
-                    }),
+                        max_tokens: 4000    // More room for detailed report
+                    })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error?.message || 'OpenAI API error');
@@ -773,13 +917,13 @@ async function callProviderForAnalysis(
                         'Content-Type': 'application/json',
                         'x-api-key': apiKey,
                         'anthropic-version': '2023-06-01',
-                        'anthropic-dangerous-direct-browser-access': 'true',
+                        'anthropic-dangerous-direct-browser-access': 'true'
                     },
                     body: JSON.stringify({
                         model,
                         max_tokens: 4000,
-                        messages: [{ role: 'user', content: prompt }],
-                    }),
+                        messages: [{ role: 'user', content: prompt }]
+                    })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error?.message || 'Anthropic API error');
@@ -789,11 +933,13 @@ async function callProviderForAnalysis(
             case 'google': {
                 response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
                     body: JSON.stringify({
                         contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
-                    }),
+                        generationConfig: { temperature: 0.3, maxOutputTokens: 4000 }
+                    })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error?.message || 'Google AI API error');

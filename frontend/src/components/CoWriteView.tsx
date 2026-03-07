@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import type { Entity, Relationship } from '../store/appStore';
-import { analyzePacing, analyzeThematicThreading, analyzeConflictEscalation, suggestBeats, generateBeatProse, generateSceneCard, analyzeDraftProse, reviseBeatProse } from '../services/aiService';
-import type { CoWriteOptions, SceneCard, PacingResult, ThematicResult, ConflictResult, DraftCritique } from '../services/aiService';
+import { analyzePacing, analyzeThematicThreading, analyzeConflictEscalation, suggestBeats, generateSceneCard, generateAgenticProse } from '../services/aiService';
+import type { CoWriteOptions, SceneCard, PacingResult, ThematicResult, ConflictResult, AgenticProseResult } from '../services/aiService';
 import { analyzeProseChunk, type FullProseDiagnostics } from '../utils/proseAnalyzer';
-import { buildSmartContext, type ContextReport } from '../services/contextBuilder';
+import { buildSmartContext, compileStoryState, type ContextReport } from '../services/contextBuilder';
+import { STYLE_PRESET_LIST } from '../services/stylePresets';
 interface CoWriteViewProps {
     entities: Entity[];
     relationships: Relationship[];
@@ -45,9 +46,11 @@ export default function CoWriteView({
     const [currentBeats, setCurrentBeats] = useState<Array<{ type: string, description: string }>>([]);
     const [completedBeats, setCompletedBeats] = useState<number>(0);
     const [liveDiagnostics, setLiveDiagnostics] = useState<FullProseDiagnostics | null>(null);
-    const [draftCritiques, setDraftCritiques] = useState<DraftCritique[]>([]);
-    const [isCritiquing, setIsCritiquing] = useState(false);
-    const [isFixingId, setIsFixingId] = useState<string | null>(null);
+
+    // V1: Conversational Co-Author State
+    const [chatInput, setChatInput] = useState('');
+    const [pendingDiff, setPendingDiff] = useState<AgenticProseResult | null>(null);
+    const [isWritingBeat, setIsWritingBeat] = useState(false); // true when auto-writing a beat
 
     // V3: Smart Context State
     const [contextReport, setContextReport] = useState<ContextReport | null>(null);
@@ -57,6 +60,7 @@ export default function CoWriteView({
         includeScientificConcepts: true
     });
     const [showContextInspector, setShowContextInspector] = useState(false);
+    const [selectedStylePreset, setSelectedStylePreset] = useState('kubrick');
 
     // Derived data
     const events = entities
@@ -93,7 +97,6 @@ export default function CoWriteView({
             setCurrentBeats((selectedEvent.properties?.scene_beats as any) || []);
             setCompletedBeats((selectedEvent.properties?.completed_beats as number) || 0);
             setLiveDiagnostics(analyzeProseChunk(prose));
-            setDraftCritiques([]); // Clear old critiques when changing events
 
             // Generate smart context on load
             const report = buildSmartContext({
@@ -142,6 +145,16 @@ export default function CoWriteView({
         updated[index].description = newDescription;
         setCurrentBeats(updated);
         // We defer saving to the parent until they generate prose to avoid too many saves
+    };
+
+    const handleDeleteBeat = (index: number) => {
+        const updated = currentBeats.filter((_, i) => i !== index);
+        let newCompleted = completedBeats;
+        // If we delete a completed beat, reduce the completedBeats count
+        if (index < completedBeats) {
+            newCompleted = Math.max(0, completedBeats - 1);
+        }
+        handleUpdateBeats(updated, newCompleted);
     };
 
     const handleGeneratePlan = async () => {
@@ -195,82 +208,168 @@ export default function CoWriteView({
         }
     };
 
+    const handleStartOver = () => {
+        if (!selectedEvent) return;
+        // Clear draft prose
+        handleSaveDraft('');
+        // Clear beats
+        handleUpdateBeats([], 0);
+        // Clear pending diff
+        setPendingDiff(null);
+        setWriteError(null);
+    };
+
+
+
+    const buildStoryStateForGeneration = () => {
+        if (!selectedEvent || !contextReport) return null;
+        return compileStoryState({
+            currentEvent: selectedEvent,
+            allEntities: entities,
+            allRelationships: relationships,
+            causalChainDepth: contextSettings.causalChainDepth,
+            characterHistoryDepth: contextSettings.characterHistoryDepth,
+            includeScientificConcepts: contextSettings.includeScientificConcepts,
+            contextReport,
+            currentBeats
+        });
+    };
+
+    const buildStylePrompt = () => {
+        return `\nStyle Guide:\n- Tone: ${options.tone}\n- POV: ${options.pov === 'first' ? '1st Person ("I")' : options.pov === 'second' ? '2nd Person ("You")' : options.pov === 'third_limited' ? '3rd Person Limited' : '3rd Person Omniscient'}\n- Tense: ${options.tense === 'past' ? 'Past Tense' : 'Present Tense'}\n- Emotional Intensity: ${options.emotionalIntensity}/5\n- Include Dialogue: ${options.includeDialogue ? 'Yes' : 'No'}`;
+    };
+
+    // Write a single beat (the next uncompleted one)
     const handleWriteNextBeat = async () => {
-        if (!selectedEvent || currentBeats.length === 0 || completedBeats >= currentBeats.length) return;
+        if (!selectedEvent || completedBeats >= currentBeats.length) return;
+
+        const storyState = buildStoryStateForGeneration();
+        if (!storyState) return;
 
         setIsWriting(true);
+        setIsWritingBeat(true);
         setWriteError(null);
-        setDraftCritiques([]);
+        setPendingDiff(null);
+
+        const beatIdx = completedBeats;
+        const beat = currentBeats[beatIdx];
+        const totalBeats = currentBeats.length;
+
+        // Build a beat-scoped instruction with strong anti-duplication
+        const existingWordCount = draftText.trim() ? draftText.trim().split(/\s+/).length : 0;
+        const previousBeatsSummary = currentBeats.slice(0, beatIdx)
+            .map((b, i) => `  ${i + 1}. [${b.type}] ${b.description} — ALREADY WRITTEN, prose exists in draft`)
+            .join('\n');
+        const upcomingBeatsSummary = currentBeats.slice(beatIdx + 1)
+            .map((b, i) => `  ${beatIdx + i + 2}. [${b.type}] ${b.description} — NOT YET WRITTEN, do NOT write`)
+            .join('\n');
+
+        const beatInstruction = `## TASK: Write ONLY beat ${beatIdx + 1} of ${totalBeats}.
+
+### CURRENT BEAT TO WRITE NOW:
+Beat ${beatIdx + 1}. [${beat.type}] ${beat.description}
+
+${previousBeatsSummary ? `### BEATS ALREADY WRITTEN (${existingWordCount} words already exist in the Current Draft):
+${previousBeatsSummary}
+
+⚠️ The Current Draft above contains ${existingWordCount} words of ALREADY-WRITTEN prose for beats 1-${beatIdx}. Do NOT rewrite, rephrase, or duplicate ANY of that content. Your output must be ENTIRELY NEW prose that CONTINUES from where the draft ends.\n` : ''}
+${upcomingBeatsSummary ? `### UPCOMING BEATS (will be written in future steps — do NOT write these):
+${upcomingBeatsSummary}\n` : ''}
+### RULES:
+1. Generate NEW prose for ONLY beat ${beatIdx + 1}.
+2. Set targetTextToReplace to null (you are APPENDING, not replacing).
+3. Your newText must flow naturally from the last paragraph of the existing draft.
+4. Do NOT repeat any sentence, image, detail, or dialogue from the existing draft.
+5. Write complete sentences with subjects and verbs — no sentence fragments.`;
 
         try {
-            const beat = currentBeats[completedBeats];
-            const stylePrompt = `Tone: ${options.tone}\nPOV: ${options.pov}\nTense: ${options.tense}\nEmotional Intensity: ${options.emotionalIntensity}`;
+            const wordTarget = (selectedEvent.properties?.word_count_target as number) || undefined;
+            const perBeatTarget = wordTarget ? Math.round(wordTarget / totalBeats) : undefined;
 
-            const beatProse = await generateBeatProse({
-                beat,
-                context: {
-                    entityName: selectedEvent.name,
-                    entityDescription: sceneCard ? JSON.stringify(sceneCard) : (selectedEvent.description || ''),
-                    previousProse: draftText.slice(-2000),
-                    projectContext: `${projectContext}\n\nStyle Guide:\n${stylePrompt}`
-                },
-                contextReport: contextReport || undefined
+            const result = await generateAgenticProse({
+                instruction: beatInstruction,
+                storyState,
+                currentDraft: draftText,
+                projectContext: `${projectContext || ''}${buildStylePrompt()}`,
+                stylePresetId: selectedStylePreset,
+                targetWordCount: perBeatTarget
             });
 
-            const newText = draftText ? draftText + '\n\n' + beatProse : beatProse;
-            handleSaveDraft(newText);
-            handleUpdateBeats(currentBeats, completedBeats + 1);
-
-            // Run Self-Reflection Critique
-            setIsCritiquing(true);
-            try {
-                const critiques = await analyzeDraftProse(beatProse, beat.description);
-                setDraftCritiques(critiques);
-            } catch (err) {
-                console.warn("Failed to critique draft", err);
-            } finally {
-                setIsCritiquing(false);
-            }
-
+            setPendingDiff(result);
         } catch (err) {
-            setWriteError(err instanceof Error ? err.message : 'Co-write failed');
+            setWriteError(err instanceof Error ? err.message : 'AI generation failed');
         } finally {
             setIsWriting(false);
         }
     };
 
-    const handleApplyFix = async (critique: DraftCritique) => {
-        if (!selectedEvent || currentBeats.length === 0 || completedBeats === 0) return;
+    // Chat submit — scoped to the current beat for context
+    const handleChatSubmit = async () => {
+        if (!selectedEvent || !chatInput.trim() || !contextReport) return;
 
-        setIsFixingId(critique.id);
+        const storyState = buildStoryStateForGeneration();
+        if (!storyState) return;
+
+        setIsWriting(true);
+        setIsWritingBeat(false);
         setWriteError(null);
+        setPendingDiff(null);
 
         try {
-            // Re-evaluating the last beat generated
-            const beatIndex = completedBeats - 1;
-            const beat = currentBeats[beatIndex];
+            // Add current beat context to the instruction
+            let scopedInstruction = chatInput;
+            if (currentBeats.length > 0 && completedBeats < currentBeats.length) {
+                const beat = currentBeats[completedBeats];
+                scopedInstruction = `[Context: Currently working on beat ${completedBeats + 1}/${currentBeats.length}: "${beat.description}"]\n\nUser instruction: ${chatInput}`;
+            }
 
-            // To be safe, we rewrite the last "paragraph" of the draft
-            // If the user has heavily edited it since, this might be tricky, 
-            // but for a smooth prototype we assume the last block of text corresponds to the last beat.
-            const draftParagraphs = draftText.trim().split(/\n\n+/);
-            const lastParagraph = draftParagraphs[draftParagraphs.length - 1];
+            const wordTarget = (selectedEvent.properties?.word_count_target as number) || undefined;
 
-            const revisedProse = await reviseBeatProse(lastParagraph, beat.description, critique, undefined);
+            const result = await generateAgenticProse({
+                instruction: scopedInstruction,
+                storyState,
+                currentDraft: draftText,
+                projectContext: `${projectContext || ''}${buildStylePrompt()}`,
+                stylePresetId: selectedStylePreset,
+                targetWordCount: wordTarget
+            });
 
-            // Replace the last paragraph with the revised one
-            draftParagraphs[draftParagraphs.length - 1] = revisedProse;
-            const newText = draftParagraphs.join('\n\n');
-
-            handleSaveDraft(newText);
-
-            // Remove this critique since it's addressed
-            setDraftCritiques(prev => prev.filter(c => c.id !== critique.id));
+            setPendingDiff(result);
         } catch (err) {
-            setWriteError(err instanceof Error ? err.message : 'Fix application failed');
+            setWriteError(err instanceof Error ? err.message : 'AI generation failed');
         } finally {
-            setIsFixingId(null);
+            setIsWriting(false);
+            setChatInput('');
         }
+    };
+
+    const handleApproveDiff = () => {
+        if (!pendingDiff || !selectedEvent) return;
+
+        let newDraft = draftText;
+        if (pendingDiff.diff.targetTextToReplace) {
+            newDraft = draftText.replace(pendingDiff.diff.targetTextToReplace, pendingDiff.diff.newText);
+        } else {
+            // When appending, add a beat marker so the AI can see clear boundaries
+            const beatMarker = isWritingBeat && completedBeats < currentBeats.length
+                ? `\n\n[--- BEAT ${completedBeats + 1} COMPLETE ---]\n\n`
+                : '\n\n';
+            newDraft = draftText ? draftText + beatMarker + pendingDiff.diff.newText : pendingDiff.diff.newText;
+        }
+
+        handleSaveDraft(newDraft);
+
+        // Auto-advance completedBeats if we were writing a beat
+        if (isWritingBeat && completedBeats < currentBeats.length) {
+            handleUpdateBeats(currentBeats, completedBeats + 1);
+        }
+
+        setPendingDiff(null);
+        setIsWritingBeat(false);
+    };
+
+    const handleRejectDiff = () => {
+        setPendingDiff(null);
     };
 
     const runFullAnalysis = async () => {
@@ -389,8 +488,15 @@ export default function CoWriteView({
                                     {currentBeats.map((beat, i) => (
                                         <div key={i} style={{
                                             display: 'flex', gap: '8px', alignItems: 'center',
-                                            opacity: i < completedBeats ? 0.5 : 1
+                                            opacity: i < completedBeats ? 0.5 : 1,
+                                            background: i === completedBeats ? 'rgba(139, 92, 246, 0.08)' : 'transparent',
+                                            padding: '4px 6px',
+                                            borderRadius: 'var(--radius-sm)',
+                                            border: i === completedBeats ? '1px solid rgba(139, 92, 246, 0.3)' : '1px solid transparent'
                                         }}>
+                                            <span style={{ fontSize: '13px', minWidth: '20px' }}>
+                                                {i < completedBeats ? '✅' : i === completedBeats ? '✍️' : '⬜'}
+                                            </span>
                                             <span style={{ fontSize: '11px', color: 'var(--accent)', minWidth: '60px' }}>[{beat.type}]</span>
                                             {i >= completedBeats ? (
                                                 <input
@@ -408,9 +514,27 @@ export default function CoWriteView({
                                                     }}
                                                 />
                                             ) : (
-                                                <span style={{ fontSize: '12px', textDecoration: 'line-through', flex: 1 }}>{beat.description}</span>
+                                                <span style={{ fontSize: '12px', flex: 1 }}>{beat.description}</span>
                                             )}
-                                            {i === completedBeats && <span className="badge" style={{ marginLeft: 'auto', background: 'var(--accent)', color: '#fff' }}>Next</span>}
+                                            {i === completedBeats && <span className="badge" style={{ marginLeft: 'auto', background: 'var(--accent)', color: '#fff', fontSize: '10px' }}>Current</span>}
+                                            <button
+                                                onClick={() => handleDeleteBeat(i)}
+                                                style={{
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    color: 'var(--error)',
+                                                    cursor: 'pointer',
+                                                    padding: '2px 4px',
+                                                    fontSize: '12px',
+                                                    marginLeft: i !== completedBeats ? 'auto' : '4px',
+                                                    opacity: 0.7
+                                                }}
+                                                onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                                                onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+                                                title="Delete beat"
+                                            >
+                                                ✕
+                                            </button>
                                         </div>
                                     ))}
                                 </div>
@@ -448,77 +572,124 @@ export default function CoWriteView({
                             </div>
                         )}
 
-                        {isCritiquing && (
-                            <div className="critique-loading" style={{ margin: 'var(--space-2) 0', fontSize: '11px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
-                                🤖 AI is self-reflecting on the generated beat...
-                            </div>
-                        )}
-
-                        {draftCritiques.length > 0 && (
-                            <div className="draft-critiques" style={{ marginTop: 'var(--space-3)', padding: 'var(--space-2)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-                                <h4 style={{ margin: '0 0 var(--space-2) 0', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontSize: '14px' }}>🧐</span> Targeted Revisions
+                        {pendingDiff && (
+                            <div className="diff-visualizer" style={{ marginTop: 'var(--space-3)', padding: 'var(--space-3)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                                <h4 style={{ margin: '0 0 var(--space-2) 0', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-primary)' }}>
+                                    <span>✨ Proposed AI Revision</span>
                                 </h4>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                    {draftCritiques.map((critique) => (
-                                        <div key={critique.id} style={{
-                                            padding: '8px 12px',
-                                            background: 'var(--bg-primary)',
-                                            borderLeft: `3px solid ${critique.severity === 'high' ? 'var(--error)' : critique.severity === 'medium' ? '#f59e0b' : 'var(--accent)'}`,
-                                            borderRadius: 'var(--radius-sm)',
-                                            fontSize: '12px',
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            alignItems: 'center'
-                                        }}>
-                                            <div>
-                                                <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>
-                                                    {critique.message}
-                                                </strong>
-                                                <span style={{ color: 'var(--text-secondary)' }}>{critique.suggestion}</span>
-                                            </div>
-                                            <button
-                                                className={`btn btn-secondary ${isFixingId === critique.id ? 'loading' : ''}`}
-                                                style={{ fontSize: '10px', padding: '4px 8px' }}
-                                                onClick={() => handleApplyFix(critique)}
-                                                disabled={isFixingId !== null}
-                                            >
-                                                {isFixingId === critique.id ? '✨ Fixing...' : '✨ Apply Fix'}
-                                            </button>
-                                        </div>
-                                    ))}
+
+                                <div className="ai-assumptions" style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '8px', background: 'rgba(0,0,0,0.1)', borderRadius: 'var(--radius-sm)' }}>
+                                    <strong style={{ color: 'var(--accent)' }}>AI Check:</strong> {pendingDiff.assumptions}
                                 </div>
+
+                                <div className="diff-content" style={{ fontSize: '14px', lineHeight: 1.6, background: 'var(--bg-primary)', padding: '12px', borderRadius: 'var(--radius-sm)' }}>
+                                    {pendingDiff.diff.targetTextToReplace && (
+                                        <div style={{ color: '#ef4444', textDecoration: 'line-through', marginBottom: '8px', opacity: 0.8 }}>
+                                            {pendingDiff.diff.targetTextToReplace}
+                                        </div>
+                                    )}
+                                    <div style={{ color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', padding: '4px 6px', borderRadius: '4px' }}>
+                                        {pendingDiff.diff.newText}
+                                    </div>
+                                </div>
+
+                                <div className="diff-actions" style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                                    <button className="cowrite-btn" style={{ background: 'var(--success)', flex: 1 }} onClick={handleApproveDiff}>
+                                        ✅ Approve & Merge
+                                    </button>
+                                    <button className="btn btn-secondary" style={{ flex: 1 }} onClick={handleRejectDiff}>
+                                        ❌ Discard
+                                    </button>
+                                </div>
+
+                                {/* Validation Results */}
+                                {pendingDiff.validation && (
+                                    <div style={{ marginTop: '12px', padding: '10px', borderRadius: 'var(--radius-md)', background: pendingDiff.validation.passed ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)', border: `1px solid ${pendingDiff.validation.passed ? 'var(--success)' : 'var(--error)'}`, fontSize: '12px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                                            <strong>{pendingDiff.validation.passed ? '✅ Validation Passed' : '⚠️ Validation Issues'}</strong>
+                                            <span>Score: <strong>{pendingDiff.validation.score}</strong>/100{pendingDiff.attempt && pendingDiff.attempt > 1 ? ` (Attempt ${pendingDiff.attempt}/3)` : ''}</span>
+                                        </div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', color: 'var(--text-secondary)' }}>
+                                            <span>📝 {pendingDiff.validation.stats.wordCount} words</span>
+                                            <span>📏 Avg sentence: {pendingDiff.validation.stats.avgSentenceLength}w</span>
+                                            <span>⚡ {pendingDiff.validation.stats.shortSentencePercent}% short sentences</span>
+                                            <span>👁️ Senses: {pendingDiff.validation.stats.sensoryChannels.join(', ')}</span>
+                                        </div>
+                                        {pendingDiff.validation.issues.length > 0 && (
+                                            <div style={{ marginTop: '8px' }}>
+                                                {pendingDiff.validation.issues.map((issue, idx) => (
+                                                    <div key={idx} style={{ color: issue.severity === 'critical' ? 'var(--error)' : issue.severity === 'major' ? '#f59e0b' : 'var(--text-secondary)', marginBottom: '2px' }}>
+                                                        {issue.severity === 'critical' ? '🔴' : issue.severity === 'major' ? '🟡' : '🟢'} {issue.message}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
 
-                        <div className="cowrite-actions" style={{ marginTop: 'var(--space-3)' }}>
-                            {currentBeats.length === 0 ? (
+                        {/* Action Buttons: Write Beat + Outline + Start Over */}
+                        <div className="cowrite-actions" style={{ marginTop: 'var(--space-3)', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                            {currentBeats.length === 0 && (
                                 <button
                                     className={`cowrite-btn ${isPlanning ? 'loading' : ''}`}
                                     onClick={handleGeneratePlan}
-                                    disabled={isPlanning}
+                                    disabled={isPlanning || isWriting}
                                 >
                                     {isPlanning ? '🗓️ Planning...' : '🗓️ Outline Scene Beats'}
                                 </button>
-                            ) : completedBeats < currentBeats.length ? (
+                            )}
+                            {currentBeats.length > 0 && completedBeats < currentBeats.length && !pendingDiff && (
                                 <button
                                     className={`cowrite-btn ${isWriting ? 'loading' : ''}`}
                                     onClick={handleWriteNextBeat}
-                                    disabled={isWriting}
-                                    style={{ background: 'var(--success)' }}
+                                    disabled={isWriting || isPlanning}
+                                    style={{ background: 'var(--accent)' }}
                                 >
-                                    {isWriting ? '✍️ Writing...' : `✨ Co-Write Beat ${completedBeats + 1}`}
-                                </button>
-                            ) : (
-                                <button
-                                    className="btn btn-secondary"
-                                    onClick={() => handleUpdateBeats([], 0)}
-                                >
-                                    🔄 Reset Scene Plan
+                                    {isWriting ? '🧠 Writing...' : `✍️ Write Beat ${completedBeats + 1}/${currentBeats.length}`}
                                 </button>
                             )}
-                            {writeError && <span className="error-text">{writeError}</span>}
+                            {completedBeats >= currentBeats.length && currentBeats.length > 0 && (
+                                <span style={{ padding: '8px 14px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', borderRadius: 'var(--radius-md)', fontSize: '13px', fontWeight: 500 }}>
+                                    ✅ All {currentBeats.length} beats written! Run Story Diagnostics →
+                                </span>
+                            )}
+                            {(draftText.trim() || currentBeats.length > 0) && (
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={handleStartOver}
+                                    disabled={isWriting || isPlanning}
+                                    style={{ color: 'var(--error)', borderColor: 'var(--error)' }}
+                                >
+                                    🗑️ Start Over
+                                </button>
+                            )}
                         </div>
+
+                        {/* Chat Input */}
+                        <div className="chat-input-container" style={{ marginTop: 'var(--space-2)', display: 'flex', gap: '8px' }}>
+                            <input
+                                type="text"
+                                style={{ flex: 1, padding: '10px 14px', fontSize: '14px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+                                placeholder={currentBeats.length > 0 && completedBeats < currentBeats.length
+                                    ? `Edit current beat (${completedBeats + 1}/${currentBeats.length}), or give a revision instruction...`
+                                    : "Type an instruction..."}
+                                value={chatInput}
+                                onChange={e => setChatInput(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleChatSubmit(); }}
+                                disabled={isWriting || !!pendingDiff}
+                            />
+                            <button
+                                className={`cowrite-btn ${isWriting ? 'loading' : ''}`}
+                                onClick={handleChatSubmit}
+                                disabled={isWriting || !!pendingDiff || !chatInput.trim()}
+                                style={{ background: 'var(--accent)', minWidth: '100px' }}
+                            >
+                                {isWriting ? '🧠 Thinking...' : '✨ Send'}
+                            </button>
+                        </div>
+                        {writeError && <span className="error-text" style={{ marginTop: '8px', display: 'block' }}>{writeError}</span>}
 
                         {/* V3: Context Inspector Preview */}
                         {contextReport && (
@@ -578,6 +749,22 @@ export default function CoWriteView({
                         />
                         <span>Include Scientific Concepts</span>
                     </label>
+                </div>
+
+                <div className="settings-section">
+                    <h3>Writing Style Preset</h3>
+
+                    <label>
+                        <span>Style Preset</span>
+                        <select value={selectedStylePreset} onChange={e => setSelectedStylePreset(e.target.value)}>
+                            {STYLE_PRESET_LIST.map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                        </select>
+                    </label>
+                    <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '6px 0 0 0' }}>
+                        {STYLE_PRESET_LIST.find(p => p.id === selectedStylePreset)?.description}
+                    </p>
                 </div>
 
                 <div className="settings-section">
