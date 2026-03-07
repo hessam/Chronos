@@ -1,14 +1,11 @@
-import { useEffect, useState, useRef, useMemo, FormEvent, useCallback } from 'react';
+import { useEffect, useState, useRef, useMemo, FormEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useAppStore, resolveEntity } from '../store/appStore';
 import type { Entity, Relationship } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
-import CausalityGraph from '../components/CausalityGraph';
-import { CorrelationPanel } from '../components/CorrelationPanel';
-import TimelineExplorer from '../components/TimelineExplorer';
-import NarrativeAuditCanvas from '../components/NarrativeAuditCanvas';
+// Canvas components removed (R-01 Sprint 1)
 import CoWriteView from '../components/CoWriteView';
 import { generateIdeas, hasConfiguredProvider, checkConsistency, analyzeRippleEffects, generateSceneCard, buildNarrativeSequence, detectMissingScenes, generateCharacterVoice, generateWikiMarkdown, analyzePOVBalance, assembleChapter, analyzeTemporalGaps, SEVERITY_ICONS, CATEGORY_LABELS, IMPACT_ICONS } from '../services/aiService';
 import type { GeneratedIdea, GenerateIdeasResult, GenerateIdeasRequest, ConsistencyReport, ConsistencyIssue, RippleReport, SceneCard, NarrativeStep, MissingScene, VoiceSample, POVIssue, ChapterBlueprint, TemporalGap } from '../services/aiService';
@@ -135,7 +132,7 @@ export default function WorkspacePage() {
 
     // Timeline visibility toggles
     const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
-    const [viewMode, setViewMode] = useState<'graph' | 'timeline' | 'audit' | 'cowrite'>('graph');
+    const [viewMode, setViewMode] = useState<'list' | 'cowrite'>('list');
     // Drag-and-drop reorder state (events only)
     const [draggedEntityId, setDraggedEntityId] = useState<string | null>(null);
     const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
@@ -258,10 +255,7 @@ export default function WorkspacePage() {
     const [relType, setRelType] = useState('involves');
     const [relLabel, setRelLabel] = useState('');
 
-    // Co-Relation Analyzer state
-    const [showAnalyzer, setShowAnalyzer] = useState(false);
-    const [correlationHighlight, setCorrelationHighlight] = useState<Set<string> | null>(null);
-    const [analyzerSourceId, setAnalyzerSourceId] = useState<string | null>(null);
+
 
     // Fetch project
     const { data: projectData } = useQuery({
@@ -509,10 +503,7 @@ export default function WorkspacePage() {
         },
     });
 
-    // Position update callback (E2-US3: drag persistence)
-    const handlePositionUpdate = useCallback((entityId: string, x: number, y: number) => {
-        updateEntity.mutate({ id: entityId, body: { position_x: x, position_y: y } });
-    }, [updateEntity]);
+
 
     // Entity field save (with ripple analysis interception for E3-US5)
     const commitSave = (field: string) => {
@@ -1129,10 +1120,6 @@ export default function WorkspacePage() {
         timelineColorMap.set(t.id, VARIANT_DOT_COLORS[i % VARIANT_DOT_COLORS.length]);
     });
 
-    // Resolve entities for canvas when in focus mode
-    const canvasEntities = focusedTimelineId
-        ? allEntities.map(e => resolveEntity(e, focusedTimelineId, allVariants))
-        : allEntities;
 
     // Resolve selected entity for display when in focus mode
     const displayEntity = selectedEntity
@@ -1277,70 +1264,42 @@ export default function WorkspacePage() {
                     </div>
                 )}
 
-                {/* View Mode Toggle */}
-                {timelines.length > 0 && (
-                    <div style={{ padding: '0 var(--space-2) var(--space-1)' }}>
-                        <div style={{
-                            display: 'flex', gap: 0, borderRadius: 'var(--radius-md)',
-                            background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-                            overflow: 'hidden',
-                        }}>
-                            <button
-                                onClick={() => { setViewMode('graph'); setSelectedEntity(null); setAiError(null); }}
-                                style={{
-                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
-                                    fontWeight: viewMode === 'graph' ? 600 : 400,
-                                    background: viewMode === 'graph' ? 'rgba(99,102,241,0.15)' : 'transparent',
-                                    color: viewMode === 'graph' ? 'var(--accent)' : 'var(--text-tertiary)',
-                                    border: 'none', cursor: 'pointer',
-                                    borderRight: '1px solid var(--border)',
-                                    transition: 'all 0.15s',
-                                }}
-                            >
-                                🕸️ Causality Graph
-                            </button>
-                            <button
-                                onClick={() => { setViewMode('timeline'); setSelectedEntity(null); setAiError(null); }}
-                                style={{
-                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
-                                    fontWeight: viewMode === 'timeline' ? 600 : 400,
-                                    background: viewMode === 'timeline' ? 'rgba(99,102,241,0.15)' : 'transparent',
-                                    color: viewMode === 'timeline' ? 'var(--accent)' : 'var(--text-tertiary)',
-                                    border: 'none', cursor: 'pointer',
-                                    transition: 'all 0.15s',
-                                }}
-                            >
-                                📐 Timeline Explorer
-                            </button>
-                            <button
-                                onClick={() => { setViewMode('audit'); setSelectedEntity(null); setAiError(null); }}
-                                style={{
-                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
-                                    fontWeight: viewMode === 'audit' ? 600 : 400,
-                                    background: viewMode === 'audit' ? 'rgba(99,102,241,0.15)' : 'transparent',
-                                    color: viewMode === 'audit' ? 'var(--accent)' : 'var(--text-tertiary)',
-                                    border: 'none', cursor: 'pointer',
-                                    transition: 'all 0.15s',
-                                }}
-                            >
-                                📋 Narrative Audit
-                            </button>
-                            <button
-                                onClick={() => { setViewMode('cowrite'); setSelectedEntity(null); setAiError(null); }}
-                                style={{
-                                    flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
-                                    fontWeight: viewMode === 'cowrite' ? 600 : 400,
-                                    background: viewMode === 'cowrite' ? 'rgba(99,102,241,0.15)' : 'transparent',
-                                    color: viewMode === 'cowrite' ? 'var(--accent)' : 'var(--text-tertiary)',
-                                    border: 'none', cursor: 'pointer',
-                                    transition: 'all 0.15s',
-                                }}
-                            >
-                                ✍️ Co-Write
-                            </button>
-                        </div>
+                {/* View Mode Toggle (Sprint 1: simplified to List + Co-Write) */}
+                <div style={{ padding: '0 var(--space-2) var(--space-1)' }}>
+                    <div style={{
+                        display: 'flex', gap: 0, borderRadius: 'var(--radius-md)',
+                        background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                        overflow: 'hidden',
+                    }}>
+                        <button
+                            onClick={() => { setViewMode('list'); setSelectedEntity(null); setAiError(null); }}
+                            style={{
+                                flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                fontWeight: viewMode === 'list' ? 600 : 400,
+                                background: viewMode === 'list' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                color: viewMode === 'list' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                border: 'none', cursor: 'pointer',
+                                borderRight: '1px solid var(--border)',
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            📋 Event List
+                        </button>
+                        <button
+                            onClick={() => { setViewMode('cowrite'); setSelectedEntity(null); setAiError(null); }}
+                            style={{
+                                flex: 1, padding: '5px 8px', fontSize: 'var(--text-xs)',
+                                fontWeight: viewMode === 'cowrite' ? 600 : 400,
+                                background: viewMode === 'cowrite' ? 'rgba(99,102,241,0.15)' : 'transparent',
+                                color: viewMode === 'cowrite' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                border: 'none', cursor: 'pointer',
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            ✍️ Co-Write
+                        </button>
                     </div>
-                )}
+                </div>
 
                 {/* AI Consistency Check Button (E3-US4) */}
                 <div style={{ padding: '0 var(--space-2) var(--space-1)' }}>
@@ -1783,85 +1742,7 @@ export default function WorkspacePage() {
 
                 {!selectedEntity ? (
                     <div style={{ flex: 1, position: 'relative' }}>
-                        {viewMode === 'graph' ? (
-                            <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%' }}>
-                                <CausalityGraph
-                                    entities={canvasEntities}
-                                    relationships={projectRelationships}
-                                    timelines={timelines}
-                                    variants={allVariants}
-                                    onEntitySelect={setSelectedEntity}
-                                    selectedEntityId={null}
-                                    hiddenTypes={hiddenTypes}
-                                    focusedTimelineId={focusedTimelineId}
-                                    onEntityPositionUpdate={handlePositionUpdate}
-                                    onCreateRelationship={(fromId, toId) => {
-                                        setRelFromId(fromId);
-                                        setRelToId(toId);
-                                        setShowCreateRelModal(true);
-                                    }}
-                                    onDeleteRelationship={(id) => deleteRelationship.mutate(id)}
-                                    correlationHighlight={correlationHighlight}
-                                    analyzerActive={showAnalyzer}
-                                    onToggleAnalyzer={() => setShowAnalyzer(p => !p)}
-                                    onEntityCreate={(type, name, x, y) => {
-                                        createEntity.mutate({
-                                            entity_type: type,
-                                            name,
-                                            description: '',
-                                            properties: { position_x: x, position_y: y },
-                                        });
-                                    }}
-                                    onEntityDelete={(id) => {
-                                        deleteEntity.mutate(id);
-                                    }}
-                                    onEntityRename={(id, newName) => {
-                                        updateEntity.mutate({ id, body: { name: newName } });
-                                    }}
-                                    onFindConnections={(entityId) => {
-                                        setAnalyzerSourceId(entityId);
-                                        setShowAnalyzer(true);
-                                    }}
-                                    onCreateRelationshipWithType={(fromId, toId, type) => {
-                                        createRelationship.mutate({
-                                            from_entity_id: fromId,
-                                            to_entity_id: toId,
-                                            relationship_type: type,
-                                        });
-                                    }}
-                                />
-                                {showAnalyzer && projectId && (
-                                    <CorrelationPanel
-                                        entities={allEntities}
-                                        projectId={projectId}
-                                        onClose={() => { setShowAnalyzer(false); setCorrelationHighlight(null); }}
-                                        onHighlightChange={setCorrelationHighlight}
-                                        onEntitySelect={(entity) => setSelectedEntity(entity)}
-                                        initialSourceId={analyzerSourceId}
-                                    />
-                                )}
-                            </div>
-                        ) : viewMode === 'audit' ? (
-                            <NarrativeAuditCanvas
-                                entities={allEntities}
-                                relationships={projectRelationships}
-                                onEntitySelect={setSelectedEntity}
-                                onEntityUpdate={(id, body) => updateEntity.mutate({ id, body })}
-                                onEntityDelete={(id) => deleteEntity.mutate(id)}
-                                onEntityCreate={(body) => createEntity.mutate({
-                                    entity_type: body.entity_type,
-                                    name: body.name,
-                                    description: body.description,
-                                    properties: body.properties,
-                                })}
-                                onRelationshipCreate={(body) => createRelationship.mutate({
-                                    from_entity_id: body.from_entity_id,
-                                    to_entity_id: body.to_entity_id,
-                                    relationship_type: body.relationship_type,
-                                    metadata: body.metadata,
-                                })}
-                            />
-                        ) : viewMode === 'cowrite' ? (
+                        {viewMode === 'cowrite' ? (
                             <CoWriteView
                                 entities={allEntities}
                                 relationships={projectRelationships}
@@ -1869,27 +1750,83 @@ export default function WorkspacePage() {
                                 projectContext={currentProject?.description || ''}
                             />
                         ) : (
-                            <TimelineExplorer
-                                entities={canvasEntities}
-                                relationships={projectRelationships}
-                                timelines={timelines}
-                                variants={allVariants}
-                                focusedTimelineId={focusedTimelineId}
-                                onEntitySelect={setSelectedEntity}
-                                selectedEntityId={null}
-                                onReorderEntity={(entityId, newOrder) => {
-                                    if (reorderEntities.isPending) return;
-                                    // CRITICAL: Always use full list for consistent sort_order
-                                    const events = (allEntitiesData?.entities || []).filter(e => e.entity_type === 'event');
-                                    const reordered = events.filter(e => e.id !== entityId);
-                                    const moved = events.find(e => e.id === entityId);
-                                    if (moved) {
-                                        reordered.splice(newOrder, 0, moved);
-                                        const updates = reordered.map((e, idx) => ({ id: e.id, sort_order: idx }));
-                                        reorderEntities.mutate(updates);
-                                    }
-                                }}
-                            />
+                            /* Event List View — Sprint 1 E-01 placeholder */
+                            <div style={{
+                                flex: 1, width: '100%', height: '100%',
+                                display: 'flex', flexDirection: 'column',
+                                padding: 'var(--space-3)',
+                                overflowY: 'auto',
+                            }}>
+                                <div style={{
+                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                    marginBottom: 'var(--space-3)',
+                                }}>
+                                    <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: 700, margin: 0 }}>
+                                        📋 Events
+                                    </h2>
+                                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                                        {allEntities.filter(e => e.entity_type === 'event').length} events
+                                    </span>
+                                </div>
+                                {/* Event table */}
+                                <div style={{
+                                    borderRadius: 'var(--radius-lg)',
+                                    border: '1px solid var(--border)',
+                                    overflow: 'hidden',
+                                }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+                                        <thead>
+                                            <tr style={{ background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border)' }}>
+                                                <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: 'var(--text-secondary)' }}>Title</th>
+                                                <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: 'var(--text-secondary)' }}>Type</th>
+                                                <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: 'var(--text-secondary)' }}>Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {allEntities
+                                                .filter(e => entityFilter === 'all' || e.entity_type === entityFilter)
+                                                .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+                                                .map(entity => {
+                                                    const props = entity.properties as Record<string, unknown> | undefined;
+                                                    const hasDraft = !!(props?.draft_text);
+                                                    return (
+                                                        <tr
+                                                            key={entity.id}
+                                                            onClick={() => setSelectedEntity(entity)}
+                                                            style={{
+                                                                borderBottom: '1px solid var(--border)',
+                                                                cursor: 'pointer',
+                                                                background: 'transparent',
+                                                                transition: 'background 0.1s',
+                                                            }}
+                                                            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                                                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                                                        >
+                                                            <td style={{ padding: '10px 12px', fontWeight: 500 }}>
+                                                                {ENTITY_ICONS[entity.entity_type] || '📄'} {entity.name}
+                                                            </td>
+                                                            <td style={{ padding: '10px 12px', color: 'var(--text-tertiary)', textTransform: 'capitalize' }}>
+                                                                {entity.entity_type}
+                                                            </td>
+                                                            <td style={{ padding: '10px 12px' }}>
+                                                                {hasDraft ? (
+                                                                    <span style={{ color: '#10b981', fontSize: 'var(--text-xs)', fontWeight: 600 }}>✓ Drafted</span>
+                                                                ) : (
+                                                                    <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>—</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                        </tbody>
+                                    </table>
+                                    {allEntities.length === 0 && (
+                                        <div style={{ padding: 'var(--space-4)', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                                            No entities yet. Create one from the sidebar.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         )}
                         {/* Focus mode banner */}
                         {focusedTimelineId && (
