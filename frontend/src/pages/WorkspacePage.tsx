@@ -295,8 +295,52 @@ export default function WorkspacePage() {
             setNewEntityName('');
             setNewEntityDesc('');
             setNewEntityProps('');
+            runConsistencyCheck();
         },
     });
+
+    // Background consistency check runner
+    const runConsistencyCheck = () => {
+        if (!projectId) return;
+        // Fire and forget, slight delay to allow invalidation to refetch
+        setTimeout(async () => {
+            try {
+                const freshEntities = await api.getEntities(projectId);
+                const reqEntities = freshEntities.entities.map(e => ({
+                    id: e.id,
+                    name: e.name,
+                    type: e.entity_type,
+                    description: e.description || '',
+                    properties: (e.properties as Record<string, unknown>) || {},
+                }));
+                const { checkConsistency } = await import('../services/aiService');
+                const report = await checkConsistency({
+                    entities: reqEntities,
+                    projectName: currentProject?.name || 'Story',
+                    scope: 'project'
+                });
+
+                // Create issues in DB
+                for (const issue of report.issues) {
+                    await api.createIssue(projectId, {
+                        title: issue.title,
+                        description: issue.description,
+                        suggestion: issue.suggestion,
+                        severity: issue.severity,
+                        issue_type: issue.issue_type,
+                        entity_id: issue.entity_id,
+                        related_entity_id: issue.related_entity_id
+                    });
+                }
+
+                if (report.issues.length > 0) {
+                    queryClient.invalidateQueries({ queryKey: ['issues', projectId] });
+                }
+            } catch (err) {
+                console.error('Async consistency check failed:', err);
+            }
+        }, 1000);
+    };
 
     // Update entity
     const updateEntity = useMutation({
@@ -308,6 +352,7 @@ export default function WorkspacePage() {
             if (selectedEntity && result.entity && (result.entity as Entity).id === selectedEntity.id) {
                 setSelectedEntity(result.entity as Entity);
             }
+            runConsistencyCheck();
         },
     });
 

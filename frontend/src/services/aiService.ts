@@ -498,19 +498,110 @@ export function hasConfiguredProvider(settings?: AISettings): boolean {
     return Object.values(s.apiKeys).some(k => k && k.length > 10);
 }
 
+// ─── Story Premise → Entity Extraction (Sprint 2: Onboarding) ────
+
+export interface ExtractedEntity {
+    entity_type: 'character' | 'timeline' | 'event' | 'location' | 'theme' | 'arc';
+    name: string;
+    description: string;
+    properties: Record<string, unknown>;
+}
+
+export interface ExtractedRelationship {
+    from_name: string;
+    to_name: string;
+    relationship_type: string;
+    label: string;
+}
+
+export interface ExtractionResult {
+    entities: ExtractedEntity[];
+    relationships: ExtractedRelationship[];
+    summary: string;
+}
+
+export async function extractEntitiesFromPremise(
+    premise: string,
+    settings?: AISettings
+): Promise<ExtractionResult> {
+    const s = settings || loadAISettings();
+    const provider = s.defaultProvider;
+    const model = s.defaultModel;
+    const apiKey = s.apiKeys[provider];
+
+    if (!apiKey) {
+        throw new Error(`No API key configured for ${provider}. Go to Settings to add one.`);
+    }
+
+    const prompt = `You are a narrative structure analyst. Given this story premise, extract the key entities and relationships.
+
+PREMISE:
+${premise}
+
+Respond with ONLY valid JSON in this exact format (no markdown, no explanation):
+{
+  "entities": [
+    {
+      "entity_type": "character|timeline|event|location|theme|arc",
+      "name": "Name",
+      "description": "Brief description (1-2 sentences)",
+      "properties": {}
+    }
+  ],
+  "relationships": [
+    {
+      "from_name": "Entity A name",
+      "to_name": "Entity B name",
+      "relationship_type": "appears_in|participates_in|causes|related_to|belongs_to|opposes|allies_with",
+      "label": "Brief label"
+    }
+  ],
+  "summary": "One-sentence summary of the extracted narrative structure"
+}
+
+RULES:
+- Extract 5-15 entities across types (characters, events, timelines, locations)
+- For characters: include "role" (protagonist/antagonist/supporting) and "motivation" in properties
+- For events: include approximate chronological "order" (number) in properties
+- For timelines: create 1-3 timeline threads that events happen on
+- Create relationships between entities that are connected in the premise
+- Keep descriptions concise but informative
+- Only create entities clearly mentioned or strongly implied by the premise`;
+
+    const raw = await callProvider(provider, model, prompt, apiKey);
+
+    // Parse JSON from response (handle markdown code fences)
+    let jsonStr = raw.trim();
+    if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    }
+
+    try {
+        const parsed = JSON.parse(jsonStr) as ExtractionResult;
+        // Validate structure
+        if (!Array.isArray(parsed.entities)) {
+            throw new Error('Invalid response: missing entities array');
+        }
+        return parsed;
+    } catch (err) {
+        console.error('Failed to parse AI extraction response:', raw);
+        throw new Error('AI returned invalid JSON. Please try again.');
+    }
+}
+
 // ─── Consistency Checking (E3-US4) ──────────────────────────
 
-export type IssueSeverity = 'error' | 'warning' | 'suggestion';
-export type IssueCategory = 'timeline_paradox' | 'character_conflict' | 'causality_break' | 'logic_gap';
+export type IssueSeverity = 'info' | 'warning' | 'error';
+export type IssueCategory = 'contradiction' | 'causality' | 'pov' | 'pacing' | 'arc' | 'continuity' | 'other';
 
 export interface ConsistencyIssue {
-    id: string;
     severity: IssueSeverity;
-    category: IssueCategory;
+    issue_type: IssueCategory;
     title: string;
     description: string;
-    entityNames: string[];  // Names of affected entities
-    suggestedFix: string;
+    suggestion: string;
+    entity_id?: string;
+    related_entity_id?: string;
 }
 
 export interface ConsistencyReport {
@@ -524,6 +615,7 @@ export interface ConsistencyReport {
 
 export interface CheckConsistencyRequest {
     entities: Array<{
+        id: string;
         name: string;
         type: string;
         description: string;
@@ -537,14 +629,17 @@ export interface CheckConsistencyRequest {
 const SEVERITY_ICONS: Record<IssueSeverity, string> = {
     error: '🔴',
     warning: '⚠️',
-    suggestion: '💡',
+    info: '💡',
 };
 
 const CATEGORY_LABELS: Record<IssueCategory, string> = {
-    timeline_paradox: 'Timeline Paradox',
-    character_conflict: 'Character Conflict',
-    causality_break: 'Causality Break',
-    logic_gap: 'Logic Gap',
+    contradiction: 'Contradiction',
+    causality: 'Causality Break',
+    pov: 'POV Issue',
+    pacing: 'Pacing',
+    arc: 'Unresolved Arc',
+    continuity: 'Continuity',
+    other: 'Other',
 };
 
 export { SEVERITY_ICONS, CATEGORY_LABELS };
@@ -587,25 +682,29 @@ ${req.scope === 'timeline' ? `## Scope: Timeline "${req.scopeTimelineName}"` : '
 ## Analysis Categories
 Look for these specific types of issues:
 
-        1. ** Timeline Paradoxes ** — Events that cannot coexist in the same timeline(e.g., a character dying before an event they participate in)
-        2. ** Character Conflicts ** — Contradictory character traits, abilities, or states across different narrative elements
-        3. ** Causality Breaks ** — Effects without causes, or events that should logically prevent subsequent events
-        4. ** Logic Gaps ** — Missing connections, unexplained jumps, or narrative elements that don't fit together
+1. **contradiction** — Direct contradictions in facts, traits, or states.
+2. **causality** — Effects without causes, or events that should logically prevent subsequent events.
+3. **continuity** — Timeline paradoxes, temporal gaps, or sequence errors.
+4. **arc** — Unresolved narrative arcs or abandoned subplots.
+5. **pov** — Shifts or errors in point-of-view constraints (if applicable).
+6. **pacing** — Narrative pacing issues.
+7. **other** — Any other logical gap.
 
 ## Response Format
 Respond ONLY with valid JSON in this exact format:
+{
+    "issues": [
         {
-            "issues": [
-                {
-                    "severity": "error|warning|suggestion",
-                    "category": "timeline_paradox|character_conflict|causality_break|logic_gap",
-                    "title": "Short descriptive title (max 10 words)",
-                    "description": "2-3 sentence explanation of the issue",
-                    "entityNames": ["Entity1", "Entity2"],
-                    "suggestedFix": "Specific suggestion to resolve"
-                }
-            ]
+            "severity": "info|warning|error",
+            "issue_type": "contradiction|causality|pov|pacing|arc|continuity|other",
+            "title": "Short descriptive title (max 10 words)",
+            "description": "2-3 sentence explanation of the issue",
+            "entity_name": "Name of primary affected entity",
+            "related_entity_name": "Name of secondary affected entity (or null)",
+            "suggestion": "Specific suggestion to resolve"
         }
+    ]
+}
 
 If the narrative is consistent and you find no issues, return: { "issues": [] }
         Important: Return between 0 and 10 issues. Prioritize the most critical ones.`;
@@ -751,24 +850,22 @@ export async function checkConsistency(
 
             const parsed = JSON.parse(jsonStr.trim());
             const issues: ConsistencyIssue[] = (parsed.issues || []).map(
-                (issue: {
-                    severity?: string;
-                    category?: string;
-                    title?: string;
-                    description?: string;
-                    entityNames?: string[];
-                    suggestedFix?: string;
-                }, i: number) => ({
-                    id: `issue-${Date.now()}-${i}`,
-                    severity: (['error', 'warning', 'suggestion'].includes(issue.severity || '')
-                        ? issue.severity : 'warning') as IssueSeverity,
-                    category: (['timeline_paradox', 'character_conflict', 'causality_break', 'logic_gap'].includes(issue.category || '')
-                        ? issue.category : 'logic_gap') as IssueCategory,
-                    title: issue.title || 'Untitled Issue',
-                    description: issue.description || '',
-                    entityNames: issue.entityNames || [],
-                    suggestedFix: issue.suggestedFix || '',
-                })
+                (issue: any) => {
+                    const primaryEntity = req.entities.find(e => e.name === issue.entity_name);
+                    const relatedEntity = req.entities.find(e => e.name === issue.related_entity_name);
+
+                    return {
+                        severity: (['info', 'warning', 'error'].includes(issue.severity)
+                            ? issue.severity : 'warning') as IssueSeverity,
+                        issue_type: (['contradiction', 'causality', 'pov', 'pacing', 'arc', 'continuity', 'other'].includes(issue.issue_type)
+                            ? issue.issue_type : 'other') as IssueCategory,
+                        title: issue.title || 'Untitled Issue',
+                        description: issue.description || '',
+                        suggestion: issue.suggestion || '',
+                        entity_id: primaryEntity?.id,
+                        related_entity_id: relatedEntity?.id,
+                    };
+                }
             );
 
             const result: ConsistencyReport = {

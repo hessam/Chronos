@@ -2,6 +2,7 @@ import { useState, FormEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import StoryIntake from './StoryIntake';
 
 const GENRES = [
     { value: 'fantasy', label: '🗡️ Fantasy', desc: 'Epic quests, magic systems, world-building' },
@@ -53,13 +54,18 @@ export default function ProjectWizard({ onClose }: ProjectWizardProps) {
     // Step 3
     const [premise, setPremise] = useState('');
     const [error, setError] = useState('');
+    const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
 
     const createMutation = useMutation({
         mutationFn: (body: { name: string; description: string }) =>
             api.createProject(body),
         onSuccess: (data) => {
             queryClient.invalidateQueries({ queryKey: ['projects'] });
-            navigate(`/project/${data.project.id}`);
+            if (startMode === 'premise') {
+                setCreatedProjectId(data.project.id);
+            } else {
+                navigate(`/project/${data.project.id}`);
+            }
         },
         onError: (err: Error) => setError(err.message),
     });
@@ -79,6 +85,21 @@ export default function ProjectWizard({ onClose }: ProjectWizardProps) {
         if (step === 3 && startMode === 'premise') return premise.trim().length > 20;
         return true;
     };
+
+    if (createdProjectId && startMode === 'premise') {
+        return (
+            <div className="modal-overlay">
+                <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640, width: '100%', padding: 0 }}>
+                    <StoryIntake
+                        projectId={createdProjectId}
+                        premise={premise}
+                        onComplete={() => navigate(`/project/${createdProjectId}`)}
+                        onSkip={() => navigate(`/project/${createdProjectId}`)}
+                    />
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="modal-overlay" onClick={onClose}>
