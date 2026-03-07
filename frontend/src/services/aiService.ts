@@ -1226,3 +1226,68 @@ Rules: Max 3 suggestions. Focus on: POV rhythm, emotional variety per POV, under
 
     return { issues, distribution, model: 'local', provider: 'openai', cached: false };
 }
+
+// ─── Style Profile Analysis (Sprint 3: B-04) ────────────────
+export interface StyleAnalysisResult {
+    preferences: Record<string, string | number>;
+    model: string;
+    provider: AIProvider;
+}
+
+export async function analyzeStyleFromProse(
+    prose: string,
+    existingPreferences?: Record<string, string | number>,
+    settings?: AISettings
+): Promise<StyleAnalysisResult> {
+    const aiSettings = settings || loadAISettings();
+    const provider = aiSettings.defaultProvider;
+    const model = aiSettings.defaultModel;
+    const apiKey = aiSettings.apiKeys[provider];
+
+    if (!apiKey) {
+        throw new Error(`No API key configured for ${provider}. Go to Settings to add one.`);
+    }
+
+    const currentStyleContext = existingPreferences && Object.keys(existingPreferences).length > 0
+        ? `\nCurrent Style Profile Metrics:\n${JSON.stringify(existingPreferences, null, 2)}\n\nUpdate these metrics based on the new text.`
+        : '';
+
+    const prompt = `You are an expert NLP style analyst. Analyze the following piece of creative prose and determine the author's writing style preferences.
+
+PROSE TO ANALYZE:
+"""
+${prose}
+"""${currentStyleContext}
+
+Return a JSON object containing EXACTLY these keys with the appropriate values based on the text (update existing metrics or generate new ones):
+{
+  "sentence_length": "short|mixed|long",
+  "metaphor_density": "low|moderate|high",
+  "dialogue_ratio": 0.0 to 1.0 (float representing percentage of dialogue),
+  "pov_style": "first|second|third_limited|third_omniscient",
+  "tense": "past|present",
+  "tone": "neutral|dark|humorous|somber|lyrical|clinical",
+  "vocabulary_level": "simple|standard|literary"
+}
+
+Respond ONLY with valid JSON. No markdown formatting, no explanations.`;
+
+    // We can use callProviderForAnalysis since it has temp 0.3, suitable for analytical tasks
+    const raw = await callProviderForAnalysis(provider, model, prompt, apiKey);
+
+    // Parse JSON
+    let jsonStr = raw;
+    const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1];
+
+    try {
+        const parsed = JSON.parse(jsonStr.trim());
+        return {
+            preferences: parsed,
+            model,
+            provider
+        };
+    } catch (err) {
+        throw new Error('Failed to parse style analysis from AI: ' + raw);
+    }
+}

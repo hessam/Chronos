@@ -173,7 +173,27 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
                                                 <button
                                                     className="btn btn-ghost btn-sm"
                                                     style={{ fontSize: 10, padding: '0 4px', height: 'auto', color: '#10b981' }}
-                                                    onClick={() => updateStatus.mutate({ id: draft.id, status: 'accepted' })}
+                                                    onClick={() => {
+                                                        updateStatus.mutate({ id: draft.id, status: 'accepted' });
+                                                        // Run style analysis in the background
+                                                        setTimeout(async () => {
+                                                            try {
+                                                                // Fetch existing profile first
+                                                                const { profile } = await api.getStyleProfile(projectId);
+                                                                const existingPrefs = profile?.preferences as Record<string, string | number> || {};
+
+                                                                // Learn from the new text
+                                                                const { analyzeStyleFromProse } = await import('../services/aiService');
+                                                                const result = await analyzeStyleFromProse(draft.content, existingPrefs);
+
+                                                                // Save back to DB
+                                                                await api.upsertStyleProfile(projectId, result.preferences);
+                                                                console.log('✅ Style profile updated based on accepted draft');
+                                                            } catch (err) {
+                                                                console.error('Failed to analyze style:', err);
+                                                            }
+                                                        }, 500);
+                                                    }}
                                                     title="Accept"
                                                 >
                                                     ✓
