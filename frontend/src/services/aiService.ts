@@ -346,15 +346,13 @@ export async function generateIdeas(
 // ─── Beat Prose Generation (New Feature) ────────────────────
 
 import type { StoryState } from './contextBuilder';
-import { validateProse, buildRevisionPrompt, type ValidationResult } from './proseValidator';
-import { getStylePreset, compileStylePrompt } from './stylePresets';
 
 export interface AgenticProseRequest {
     instruction: string;
     storyState: StoryState;
     currentDraft: string;
     projectContext?: string;
-    stylePresetId?: string;
+    styleProfile?: Record<string, string | number>;
     targetWordCount?: number;
 }
 
@@ -364,7 +362,7 @@ export interface AgenticProseResult {
         targetTextToReplace: string | null;
         newText: string;
     };
-    validation?: ValidationResult;
+    selfCritique?: string;
     attempt?: number;
 }
 
@@ -374,9 +372,12 @@ export async function generateAgenticProse(
 ): Promise<AgenticProseResult> {
     const aiSettings = settings || loadAISettings();
 
-    // Resolve style preset
-    const stylePreset = req.stylePresetId ? getStylePreset(req.stylePresetId) : undefined;
-    const styleBlock = stylePreset ? compileStylePrompt(stylePreset) : '';
+    // Compile learned style profile
+    let styleBlock = '';
+    if (req.styleProfile && Object.keys(req.styleProfile).length > 0) {
+        styleBlock = `## STYLE PROFILE (Apply these preferences)
+${Object.entries(req.styleProfile).map(([k, v]) => `- ${k.replace('_', ' ').toUpperCase()}: ${v}`).join('\n')}`;
+    }
 
     // Build scene boundary block
     const sceneBoundaryBlock = `## SCENE BOUNDARIES (CRITICAL — do NOT violate)
@@ -391,7 +392,7 @@ NEXT EVENT: ${req.storyState.sceneMandates.nextEventSummary}
 
     const basePrompt = `You are an expert fiction writer acting as a co-author. You write publishable-quality prose.
 
-## 1. HARD CONSTRAINTS (MANDATORY — violation = regeneration)
+## 1. HARD CONSTRAINTS (MANDATORY)
 
 1. SHOW, DON'T TELL. Ground every moment in physical senses. Never name emotions directly.
 2. NO PURPLE PROSE. Use hard, concrete nouns and active verbs. No abstractions.
@@ -413,23 +414,16 @@ ${sceneBoundaryBlock}
 - **Location:** ${req.storyState.sceneMandates.location}
 - **Active Characters:**
 ${req.storyState.characters.map(c => `  - ${c.name}: ${c.description} [Attributes: ${JSON.stringify(c.attributes)}]`).join('\n')}
-- **Active Locations:**
-${req.storyState.locations.map(l => `  - ${l.name}: ${l.description} [Attributes: ${JSON.stringify(l.attributes)}]`).join('\n')}
-- **Active Relationships:**
-${req.storyState.activeRelationships.map(r => `  - ${r.from} -> ${r.to}: ${r.type}`).join('\n')}
 
-## 4. The Story So Far (Chronological Timeline)
-${req.storyState.timeline}
-
-## 5. Current Draft Prose
+## 4. Current Draft Prose
 """
 ${req.currentDraft}
 """
 
-## 6. User Instruction
+## 5. User Instruction
 ${req.instruction}
 
-## 7. OUTPUT FORMAT
+## 6. OUTPUT FORMAT
 
 Respond EXACTLY with valid JSON — no markdown fences, no explanation:
 {
@@ -441,50 +435,86 @@ Respond EXACTLY with valid JSON — no markdown fences, no explanation:
 }
 `;
 
-    const prompt = basePrompt;
+    const provider = aiSettings.defaultProvider;
+    const model = aiSettings.defaultModel;
+    const apiKey = aiSettings.apiKeys[provider];
 
-    const providers: AIProvider[] = [aiSettings.defaultProvider];
-    let lastError: Error | null = null;
-    const MAX_ATTEMPTS = stylePreset ? 3 : 1;
+    if (!apiKey) {
+        throw new Error(`No API key configured for ${provider}. Go to Settings to add one.`);
+    }
 
-    for (const provider of providers) {
-        if (!aiSettings.apiKeys[provider]) continue;
-        const model = provider === aiSettings.defaultProvider ? aiSettings.defaultModel : AI_MODELS.find(m => m.provider === provider)?.id || '';
-        if (!model) continue;
+    let currentPrompt = basePrompt;
+    let finalResult: AgenticProseResult | null = null;
+    let combinedCritique = '';
 
-        let currentPrompt = prompt;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        console.log(`[ProseGen] Attempt ${attempt} generating draft...`);
+        const raw = await callProvider(provider, model, currentPrompt, apiKey);
 
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            try {
-                const raw = await callProvider(provider, model, currentPrompt, aiSettings.apiKeys[provider]!);
-                let jsonStr = raw;
-                const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-                if (jsonMatch) jsonStr = jsonMatch[1];
-                const result = JSON.parse(jsonStr.trim()) as AgenticProseResult;
+        let jsonStr = raw;
+        const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) jsonStr = jsonMatch[1];
 
-                // Validate if we have a style preset
-                if (stylePreset && result.diff.newText) {
-                    const validation = validateProse(result.diff.newText, stylePreset, req.targetWordCount);
-                    result.validation = validation;
-                    result.attempt = attempt;
+        const result = JSON.parse(jsonStr.trim()) as AgenticProseResult;
 
-                    if (!validation.passed && attempt < MAX_ATTEMPTS) {
-                        // Auto-retry with revision prompt
-                        console.log(`[ProseValidator] Attempt ${attempt} failed (score: ${validation.score}). Retrying...`);
-                        const revisionInstructions = buildRevisionPrompt(result.diff.newText, validation.issues);
-                        currentPrompt = `${prompt}\n\n## REVISION REQUEST (Attempt ${attempt + 1})\n${revisionInstructions}`;
-                        continue;
-                    }
-                }
+        if (!result.diff.newText) {
+            throw new Error("AI failed to generate new text.");
+        }
 
-                return result;
-            } catch (e) {
-                lastError = e instanceof Error ? e : new Error(String(e));
-                console.warn(`Provider ${provider} failed for generateAgenticProse (attempt ${attempt})`, e);
+        if (attempt === 2) {
+            // Already revised, accept it
+            finalResult = result;
+            break;
+        }
+
+        // --- SELF-CRITIQUE ---
+        console.log(`[ProseGen] Running self-critique on draft...`);
+        const critiquePrompt = `You are a harsh literary editor. Review this prose draft against the target constraints.
+        
+DRAFT:
+"""
+${result.diff.newText}
+"""
+
+CONSTRAINTS:
+${styleBlock || 'Show, don\'t tell. Concrete sensory details.'}
+
+OUTPUT FORMAT:
+Respond exactly with valid JSON:
+{
+    "met_constraints": true or false,
+    "critique": "If false, provide a 1-2 sentence harsh critique on what to fix. If true, empty string."
+}`;
+
+        try {
+            const critiqueRaw = await callProviderForAnalysis(provider, model, critiquePrompt, apiKey);
+            let critJsonStr = critiqueRaw;
+            const critMatch = critiqueRaw.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (critMatch) critJsonStr = critMatch[1];
+
+            const critiqueParsed = JSON.parse(critJsonStr.trim());
+
+            if (critiqueParsed.met_constraints || !critiqueParsed.critique) {
+                console.log(`[ProseGen] Self-critique passed!`);
+                finalResult = result;
+                combinedCritique = 'Passed initial style critique.';
+                break;
+            } else {
+                console.log(`[ProseGen] Self-critique failed:`, critiqueParsed.critique);
+                combinedCritique = critiqueParsed.critique;
+                currentPrompt = `${basePrompt}\n\n## REVISION REQUEST (Attempt 2)\nYour previous draft failed peer review. EDITOR NOTES:\n${critiqueParsed.critique}\n\nPlease revise the prose to address these notes.`;
             }
+        } catch (e) {
+            console.warn('[ProseGen] Self-critique failed to parse, accepting draft.', e);
+            finalResult = result;
+            break;
         }
     }
-    throw new Error(lastError?.message || 'No AI provider available');
+
+    if (!finalResult) throw new Error("Failed to generate prose.");
+
+    finalResult.selfCritique = combinedCritique;
+    return finalResult;
 }
 
 // ─── Get available models for a provider ────────────────────

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
-import type { ProseDraft } from '../store/appStore';
+import type { ProseDraft, Entity, Relationship } from '../store/appStore';
+import { buildSmartContext, compileStoryState } from '../services/contextBuilder';
+import { generateAgenticProse } from '../services/aiService';
 
 interface ProseTabProps {
     entityId: string;
@@ -15,6 +17,7 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
     const queryClient = useQueryClient();
     const [draftText, setDraftText] = useState(initialDraft || '');
     const [isExpanded, setIsExpanded] = useState(true);
+    const [isGenerating, setIsGenerating] = useState(false);
 
     const { data: draftsData } = useQuery({
         queryKey: ['prose_drafts', entityId],
@@ -23,14 +26,16 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
     });
 
     const saveDraft = useMutation({
-        mutationFn: (content: string) => api.createProseDraft(projectId, {
+        mutationFn: ({ content, ai_feedback }: { content: string, ai_feedback?: string }) => api.createProseDraft(projectId, {
             entity_id: entityId,
             content,
             word_count: content.split(/\s+/).filter(Boolean).length,
             status: 'draft',
+            ai_feedback,
         }),
-        onSuccess: () => {
+        onSuccess: (data) => {
             queryClient.invalidateQueries({ queryKey: ['prose_drafts', entityId] });
+            setDraftText(data.draft.content);
         },
     });
 
@@ -48,8 +53,68 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
 
     const handleSave = () => {
         if (!draftText.trim()) return;
-        saveDraft.mutate(draftText);
+        saveDraft.mutate({ content: draftText });
         onDraftChange?.(draftText);
+    };
+
+    const handleGenerate = async () => {
+        setIsGenerating(true);
+        try {
+            const entitiesData = queryClient.getQueryData<{ entities: Entity[] }>(['entities', projectId]);
+            const relsData = queryClient.getQueryData<{ relationships: Relationship[] }>(['relationships', projectId]);
+
+            if (!entitiesData || !relsData) {
+                alert("Please wait for project data to load...");
+                return;
+            }
+
+            const currentEvent = entitiesData.entities.find(e => e.id === entityId);
+            if (!currentEvent) throw new Error("Event not found");
+
+            const contextReport = buildSmartContext({
+                currentEvent,
+                allEntities: entitiesData.entities,
+                allRelationships: relsData.relationships,
+                causalChainDepth: 2,
+                characterHistoryDepth: 5,
+                includeScientificConcepts: false
+            });
+
+            const beats = (currentEvent.properties.scene_beats as { type: string; description: string }[]) || [];
+
+            const storyState = compileStoryState({
+                currentEvent,
+                allEntities: entitiesData.entities,
+                allRelationships: relsData.relationships,
+                causalChainDepth: 2,
+                characterHistoryDepth: 5,
+                includeScientificConcepts: false,
+                contextReport,
+                currentBeats: beats
+            });
+
+            const { profile } = await api.getStyleProfile(projectId);
+            const styleProfile = profile?.preferences as Record<string, string | number> | undefined;
+
+            const result = await generateAgenticProse({
+                instruction: draftText ? "Continue the scene." : "Write the scene from the beginning.",
+                storyState,
+                currentDraft: draftText,
+                styleProfile,
+            });
+
+            saveDraft.mutate({
+                content: result.diff.newText,
+                ai_feedback: result.selfCritique
+            });
+            onDraftChange?.(result.diff.newText);
+
+        } catch (err) {
+            console.error(err);
+            alert("Generation failed: " + (err as Error).message);
+        } finally {
+            setIsGenerating(false);
+        }
     };
 
     return (
@@ -109,6 +174,19 @@ export default function ProseTab({ entityId, projectId, entityName, initialDraft
                             {wordCount} words · {drafts.length} draft{drafts.length !== 1 ? 's' : ''} saved
                         </span>
                         <div style={{ display: 'flex', gap: 4 }}>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                style={{ fontSize: 'var(--text-xs)', padding: '2px 10px', display: 'flex', alignItems: 'center', gap: 4 }}
+                                onClick={handleGenerate}
+                                disabled={isGenerating}
+                            >
+                                {isGenerating ? (
+                                    <>
+                                        <div className="spinner" style={{ width: 10, height: 10, borderWidth: 2 }}></div>
+                                        Generating...
+                                    </>
+                                ) : '✨ Generate Prose'}
+                            </button>
                             <button
                                 className="btn btn-secondary btn-sm"
                                 style={{ fontSize: 'var(--text-xs)', padding: '2px 10px' }}
