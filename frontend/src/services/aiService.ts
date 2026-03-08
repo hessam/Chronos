@@ -191,7 +191,7 @@ Respond ONLY with valid JSON in this exact format:
 }
 
 // Call AI provider
-async function callProvider(
+export async function callProvider(
     provider: AIProvider,
     model: string,
     prompt: string,

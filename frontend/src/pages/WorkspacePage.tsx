@@ -12,6 +12,7 @@ import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
 import ProseTab from '../components/ProseTab';
 import RipplePanel from '../components/RipplePanel';
+import ConversationPanel from '../components/ConversationPanel';
 import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 const ENTITY_ICONS: Record<string, string> = {
@@ -117,7 +118,7 @@ export default function WorkspacePage() {
     // Timeline visibility toggles
     // Drag-and-drop reorder state (events only)
     // Variant editing state
-    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants' | 'relationships' | 'beats'>('details');
+    const [activeDetailTab, setActiveDetailTab] = useState<'details' | 'variants' | 'relationships' | 'beats' | 'chat'>('details');
     const [editingVariantTimeline, setEditingVariantTimeline] = useState<string | null>(null);
     const [variantNameVal, setVariantNameVal] = useState('');
     const [variantDescVal, setVariantDescVal] = useState('');
@@ -957,6 +958,18 @@ export default function WorkspacePage() {
                                             ) : null;
                                         })()}
                                     </button>
+                                    <button
+                                        onClick={() => setActiveDetailTab('chat')}
+                                        style={{
+                                            padding: '8px 16px', fontSize: 'var(--text-sm)', fontWeight: 500,
+                                            background: 'none', border: 'none', cursor: 'pointer',
+                                            color: activeDetailTab === 'chat' ? 'var(--accent)' : 'var(--text-tertiary)',
+                                            borderBottom: activeDetailTab === 'chat' ? '2px solid var(--accent)' : '2px solid transparent',
+                                            marginBottom: -2, transition: 'all 0.15s',
+                                        }}
+                                    >
+                                        💬 Chat
+                                    </button>
                                 </div>
                             )}
 
@@ -1673,6 +1686,18 @@ export default function WorkspacePage() {
                                 </div>
                             );
                         })()}
+
+                        {/* Chat Tab (Ticket B-08) */}
+                        {activeDetailTab === 'chat' && projectId && (
+                            <div style={{ height: 500 }}>
+                                <ConversationPanel
+                                    projectId={projectId}
+                                    projectName={currentProject?.name || ''}
+                                    contextEntity={selectedEntity}
+                                    allEntities={allEntities}
+                                />
+                            </div>
+                        )}
 
                         {/* Agentic Prose Generation (Ticket B-05) */}
                         {selectedEntity?.entity_type === 'event' && projectId && (
