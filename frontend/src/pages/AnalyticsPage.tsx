@@ -152,7 +152,7 @@ export default function AnalyticsPage() {
     });
 
     const entities = entitiesData?.entities || [];
-    const relationships = relData?.relationships || [];
+    const relationships = (relData?.relationships || []) as Relationship[];
     const project = projectData?.project;
     const openIssues = issuesData?.issues || [];
 

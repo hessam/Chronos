@@ -11,6 +11,7 @@ import { useAuthStore } from '../store/authStore';
 import { subscribeToProject, unsubscribeFromProject, onRealtimeEvent } from '../services/realtimeService';
 import { trackPresence, stopPresence, broadcastEditingEntity } from '../services/presenceService';
 import ProseTab from '../components/ProseTab';
+import RipplePanel from '../components/RipplePanel';
 import { RELATIONSHIP_TYPES } from '../constants/relationships';
 
 const ENTITY_ICONS: Record<string, string> = {
@@ -1687,6 +1688,23 @@ export default function WorkspacePage() {
                                     initialDraft={((selectedEntity.properties as Record<string, unknown>)?.draft_text as string) || ''}
                                 />
                             </div>
+                        )}
+
+                        {/* Ripple Effect Visualiser (Ticket B-06) */}
+                        {selectedEntity?.entity_type === 'event' && (
+                            <RipplePanel
+                                entity={selectedEntity}
+                                allEntities={allEntities}
+                                relationships={projectRelationships}
+                                projectName={currentProject?.name || ''}
+                                onNavigateToEntity={(id) => {
+                                    const target = allEntities.find(e => e.id === id);
+                                    if (target) {
+                                        setSelectedEntity(target);
+                                        setActiveDetailTab('details');
+                                    }
+                                }}
+                            />
                         )}
 
                     </div>
