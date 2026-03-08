@@ -882,6 +882,9 @@ export default function WorkspacePage() {
                                 <div style={{
                                     display: 'flex', gap: 0, marginBottom: 'var(--space-3)',
                                     borderBottom: '2px solid var(--border)',
+                                    overflowX: 'auto', scrollbarWidth: 'none',
+                                    msOverflowStyle: 'none',
+                                    WebkitOverflowScrolling: 'touch',
                                 }}>
                                     <button
                                         onClick={() => setActiveDetailTab('details')}
